@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>치치직 - 다시보기</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="logo" href="/"><span class="logo-mark">▶</span>치치<span class="accent">직</span></a>
+    <a class="btn btn-primary" href="/upload.html">＋ 방송 등록</a>
+  </header>
+  <main>
+    <h1>다시보기</h1>
+    <div id="list" class="grid" aria-live="polite"></div>
+    <div id="empty" class="empty" hidden>
+      <p>아직 등록된 방송이 없습니다.</p>
+      <a class="btn btn-primary" href="/upload.html">첫 방송 등록하기</a>
+    </div>
+    <p id="error" class="error"></p>
+  </main>
+  <script src="/common.js"></script>
+  <script>
+    (async () => {
+      const { api, esc, duration, ago, views } = chi;
+      try {
+        const items = await api('/api/broadcasts');
+        document.getElementById('empty').hidden = items.length > 0;
+        document.getElementById('list').innerHTML = items.map((b) => `
+          <a class="card" href="/watch.html?id=${b.id}">
+            <div class="thumb">
+              <div class="ph">▶</div>
+              <video src="${esc(b.videoUrl)}#t=1" preload="metadata" muted playsinline
+                     onloadeddata="this.previousElementSibling.remove()" onerror="this.remove()"></video>
+              <span class="badge rec">다시보기</span>
+              ${b.durationSec ? `<span class="badge dur">${duration(b.durationSec)}</span>` : ''}
+            </div>
+            <div class="card-title">${esc(b.title)}</div>
+            <div class="meta">${esc(b.streamer || '익명 스트리머')}</div>
+            <div class="meta">${views(b.views)} · ${ago(b.createdAt)}</div>
+          </a>`).join('');
+      } catch (e) {
+        document.getElementById('error').textContent = e.message;
+      }
+    })();
+  </script>
+</body>
+</html>

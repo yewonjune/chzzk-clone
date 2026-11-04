@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>치치직 - 시청</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="logo" href="/"><span class="logo-mark">▶</span>치치<span class="accent">직</span></a>
+    <a class="btn btn-primary" href="/upload.html">＋ 방송 등록</a>
+  </header>
+  <main>
+    <section id="watch" hidden>
+      <div class="player-wrap"><video id="player" controls playsinline preload="metadata"></video></div>
+      <h1 class="watch-title" id="title"></h1>
+      <div class="info-row">
+        <span class="streamer" id="streamer"></span>
+        <span id="views"></span>
+        <span id="date"></span>
+        <span id="dur"></span>
+      </div>
+      <div class="desc" id="desc"></div>
+    </section>
+    <p id="error" class="error"></p>
+    <a class="btn" href="/">← 목록으로</a>
+  </main>
+  <script src="/common.js"></script>
+  <script>
+    (async () => {
+      const { api, duration, views } = chi;
+      const $ = (id) => document.getElementById(id);
+      const id = new URLSearchParams(location.search).get('id');
+      try {
+        if (!id) throw new Error('방송을 찾을 수 없습니다.');
+        const b = await api(`/api/broadcasts/${encodeURIComponent(id)}`);
+        document.title = `${b.title} - 치치직`;
+        $('title').textContent = b.title;
+        $('streamer').textContent = b.streamer || '익명 스트리머';
+        $('views').textContent = views(b.views);
+        $('date').textContent = new Date(b.createdAt).toLocaleString('ko-KR');
+        $('dur').textContent = duration(b.durationSec);
+        $('desc').textContent = b.description;
+        const player = $('player');
+        player.src = b.videoUrl;
+        player.addEventListener('error', () => {
+          $('error').textContent = '영상을 재생할 수 없습니다. 파일이 없거나 브라우저가 지원하지 않는 형식일 수 있습니다.';
+        });
+        $('watch').hidden = false;
+        // 상세 화면 진입 시 조회수 1 증가 (실패해도 시청에는 영향 없음)
+        api(`/api/broadcasts/${b.id}/views`, { method: 'POST' })
+          .then((r) => { $('views').textContent = views(r.views); }).catch(() => {});
+      } catch (e) {
+        $('error').textContent = e.message;
+      }
+    })();
+  </script>
+</body>
+</html>

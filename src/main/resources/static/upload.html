@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>치치직 - 방송 등록</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="logo" href="/"><span class="logo-mark">▶</span>치치<span class="accent">직</span></a>
+    <a class="btn" href="/">목록</a>
+  </header>
+  <main>
+    <h1>녹화 방송 등록</h1>
+    <form id="form" class="form" novalidate>
+      <div class="field">
+        <label for="title">제목 *</label>
+        <input id="title" name="title" type="text" maxlength="100" required placeholder="예) 새벽 3시 랭크 게임 풀영상">
+      </div>
+      <div class="field">
+        <label for="streamer">스트리머</label>
+        <input id="streamer" name="streamer" type="text" maxlength="40" placeholder="비워두면 '익명 스트리머'">
+      </div>
+      <div class="field">
+        <label>영상 *</label>
+        <div class="tabs" role="tablist">
+          <button type="button" class="btn" role="tab" data-mode="upload" aria-selected="true">파일 업로드</button>
+          <button type="button" class="btn" role="tab" data-mode="url" aria-selected="false">영상 주소 연결</button>
+        </div>
+        <div id="mode-upload">
+          <label class="drop" id="drop">
+            <input id="file" type="file" accept="video/mp4,video/webm,video/ogg,video/quicktime,.mp4,.webm,.ogg,.ogv,.mov,.m4v">
+            <strong id="file-label">영상 파일을 끌어 놓거나 클릭해서 선택</strong>
+            <span>MP4, WebM, OGG, MOV</span>
+          </label>
+        </div>
+        <div id="mode-url" hidden>
+          <input id="videoUrl" type="url" placeholder="https://example.com/video.mp4">
+          <span class="hint">브라우저에서 바로 재생 가능한 영상 파일 주소(mp4, webm 등)를 입력하세요.</span>
+        </div>
+        <video id="preview" class="preview" controls muted playsinline hidden></video>
+      </div>
+      <div class="field">
+        <label for="description">설명</label>
+        <textarea id="description" name="description" maxlength="2000" placeholder="방송 내용을 소개해 주세요."></textarea>
+      </div>
+      <div class="progress" id="progress" hidden><div></div></div>
+      <p class="error" id="error"></p>
+      <div><button class="btn btn-primary" id="submit" type="submit">등록하기</button></div>
+    </form>
+  </main>
+  <script src="/common.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let mode = 'upload';
+    let file = null;
+    let durationSec = null;
+    let objectUrl = null;
+
+    document.querySelectorAll('[data-mode]').forEach((btn) => btn.addEventListener('click', () => {
+      mode = btn.dataset.mode;
+      document.querySelectorAll('[data-mode]').forEach((b) => b.setAttribute('aria-selected', b === btn));
+      $('mode-upload').hidden = mode !== 'upload';
+      $('mode-url').hidden = mode !== 'url';
+      refreshPreview();
+    }));
+
+    function setFile(f) {
+      file = f || null;
+      $('file-label').textContent = file ? `${file.name} (${(file.size / 1024 / 1024).toFixed(1)}MB)` : '영상 파일을 끌어 놓거나 클릭해서 선택';
+      refreshPreview();
+    }
+    $('file').addEventListener('change', (e) => setFile(e.target.files[0]));
+    const drop = $('drop');
+    drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+    drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+    drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('over'); setFile(e.dataTransfer.files[0]); });
+    $('videoUrl').addEventListener('change', refreshPreview);
+
+    // 미리보기 + 재생 길이 측정 (측정값은 목록의 재생시간 배지에 사용)
+    function refreshPreview() {
+      const p = $('preview');
+      durationSec = null;
+      if (objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = null; }
+      const src = mode === 'upload' ? (file && (objectUrl = URL.createObjectURL(file))) : $('videoUrl').value.trim();
+      if (!src) { p.hidden = true; p.removeAttribute('src'); p.load(); return; }
+      p.src = src;
+      p.hidden = false;
+    }
+    $('preview').addEventListener('loadedmetadata', (e) => {
+      if (isFinite(e.target.duration)) durationSec = e.target.duration;
+    });
+
+    $('form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      $('error').textContent = '';
+      const title = $('title').value.trim();
+      if (!title) return showError('제목을 입력해 주세요.');
+      const fd = new FormData();
+      fd.append('title', title);
+      fd.append('streamer', $('streamer').value.trim());
+      fd.append('description', $('description').value.trim());
+      if (durationSec) fd.append('durationSec', String(durationSec));
+      if (mode === 'upload') {
+        if (!file) return showError('영상 파일을 선택해 주세요.');
+        fd.append('video', file);
+      } else {
+        const url = $('videoUrl').value.trim();
+        if (!url) return showError('영상 주소를 입력해 주세요.');
+        fd.append('videoUrl', url);
+      }
+
+      // 업로드 진행률 표시를 위해 XHR 사용
+      const xhr = new XMLHttpRequest();
+      const bar = $('progress');
+      bar.hidden = false; bar.firstElementChild.style.width = '0';
+      $('submit').disabled = true;
+      xhr.upload.onprogress = (ev) => {
+        if (ev.lengthComputable) bar.firstElementChild.style.width = `${(ev.loaded / ev.total) * 100}%`;
+      };
+      xhr.onload = () => {
+        let body = {};
+        try { body = JSON.parse(xhr.responseText); } catch {}
+        if (xhr.status === 201) return location.assign(`/watch.html?id=${body.id}`);
+        done(); showError(body.error || `등록 실패 (${xhr.status})`);
+      };
+      xhr.onerror = () => { done(); showError('네트워크 오류로 등록하지 못했습니다.'); };
+      xhr.open('POST', '/api/broadcasts');
+      xhr.send(fd);
+
+      function done() { $('submit').disabled = false; bar.hidden = true; }
+    });
+
+    function showError(msg) { $('error').textContent = msg; }
+  </script>
+</body>
+</html>
