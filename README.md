@@ -81,6 +81,10 @@ MAX_UPLOAD_SIZE=1GB       # 업로드 최대 크기
 
 자동 검증: `./gradlew test` — 임시 폴더로 실제 서버를 두 번 띄워 등록 → 목록 → Range 재생 → 재시작 후 조회까지 확인합니다.
 
+## 설계 문서
+
+시스템 아키텍처, ERD, 기술적 고민 및 개선 과제는 [docs/stage1-design.md](docs/stage1-design.md)에 정리했습니다.
+
 ## 폴더 구조
 
 ```
