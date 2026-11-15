@@ -75,7 +75,8 @@ window.chi = {
     if (diff < 86400 * 30) return `${Math.floor(diff / 86400)}일 전`;
     return new Date(iso).toLocaleDateString('ko-KR');
   },
-  views: (n) => `조회수 ${Number(n || 0).toLocaleString('ko-KR')}회`,
+  won: (n) => `${Number(n || 0).toLocaleString('ko-KR')}원`,
+  views: (n) =>`조회수 ${Number(n || 0).toLocaleString('ko-KR')}회`,
   viewers: (n) => `시청자 ${Number(n || 0).toLocaleString('ko-KR')}명`,
   // 방송 시간: 시작~종료(또는 지금)
   elapsed(startIso, endIso) {

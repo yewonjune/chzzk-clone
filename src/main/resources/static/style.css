@@ -197,3 +197,59 @@ button.link:hover { color: var(--text); text-decoration: underline; }
 .login-needed { text-align: center; padding: 40px 16px; }
 /* 송출 화면: 방송 중 댓글을 영상 아래에 */
 .live-comments .comments { max-height: 40vh; overflow-y: auto; }
+
+/* ---- 4단계: 도네이션 ---- */
+.btn-donate { margin-left: auto; background: #ffb020; border-color: #ffb020; color: #2a1a00; }
+.btn-donate:hover { filter: brightness(1.06); border-color: #ffb020; }
+.won { color: #ffc24a; }
+.donations-wrap { margin-top: 28px; }
+.donations-wrap .section-head { flex-wrap: wrap; }
+.donations { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 4px; max-height: 320px; overflow-y: auto; }
+.donation { padding: 10px 12px; border-radius: 8px; background: var(--surface); border-left: 3px solid #ffb020; }
+.donation-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; font-size: 14px; }
+.donation-head .meta { margin-left: auto; }
+.donation-msg { margin-top: 2px; font-size: 14px; white-space: pre-wrap; word-break: break-word; }
+.donation-msg:empty { display: none; }
+.donation-toast {
+  position: fixed; left: 50%; top: 76px; transform: translateX(-50%); z-index: 50;
+  max-width: min(92vw, 420px); padding: 14px 18px; border-radius: 12px; text-align: center;
+  background: #2a2112; border: 1px solid #ffb020; box-shadow: 0 10px 30px rgba(0, 0, 0, .5);
+  transition: opacity .6s, transform .6s;
+}
+.donation-toast.out { opacity: 0; transform: translate(-50%, -10px); }
+
+.donate-box { max-width: 560px; margin: 8px auto; display: grid; gap: 18px; }
+.donate-box h1 { margin: 0; }
+select {
+  width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); font: inherit;
+}
+input[type=number] {
+  width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); font: inherit;
+}
+.amounts { display: flex; flex-wrap: wrap; gap: 6px; }
+.amounts .btn[aria-pressed=true] { border-color: #ffb020; color: #ffc24a; }
+.btn-pay { justify-content: center; padding: 12px 16px; font-size: 16px; }
+
+.result { text-align: center; padding: 24px 16px; border-radius: var(--radius); background: var(--surface); }
+.result h1 { font-size: 20px; margin: 8px 0 6px; }
+.result-icon {
+  display: inline-grid; place-items: center; width: 56px; height: 56px; border-radius: 50%;
+  font-size: 28px; font-weight: 800; background: var(--surface-2); color: var(--muted);
+}
+.result[data-state=ok] .result-icon { background: var(--accent); color: var(--accent-ink); }
+.result[data-state=bad] .result-icon { background: #3a1d22; color: var(--danger); }
+.result-table { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; text-align: left; margin: 18px auto 0; max-width: 420px; font-size: 14px; }
+.result-table dt { color: var(--muted); }
+.result-table dd { margin: 0; word-break: break-all; }
+.mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+
+.fake-pg { background: #eef1f5; color: #1b1e24; }
+.fake-pg .meta { color: #5d6470; }
+.pg-card { margin-top: 40px; padding: 24px; border-radius: 14px; background: #fff; box-shadow: 0 8px 30px rgba(0, 0, 0, .12); display: grid; gap: 10px; }
+.pg-head { font-weight: 700; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pg-amount { font-size: 30px; font-weight: 800; margin: 0; }
+.pg-buttons { display: grid; gap: 8px; margin-top: 8px; }
+.pg-buttons .btn { justify-content: center; background: #f2f4f7; color: #1b1e24; border-color: #d7dbe2; }
+.pg-buttons .btn-primary { background: #3182f6; border-color: #3182f6; color: #fff; }

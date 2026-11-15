@@ -58,6 +58,7 @@
       </div>
       <p class="meta" id="live-note" style="margin-top:10px"></p>
       <!-- 방송 중 댓글: 시청자가 쓴 댓글이 바로 보이고, 스트리머는 댓글을 삭제할 수 있음 -->
+      <div class="donations-wrap" id="donations"></div>
       <div class="comments-wrap live-comments" id="comments"></div>
     </div>
 
@@ -71,6 +72,7 @@
   </main>
   <script src="/common.js"></script>
   <script src="/comments.js"></script>
+  <script src="/donations.js"></script>
   <script>
     const $ = (id) => document.getElementById(id);
     const s = {
@@ -153,6 +155,7 @@
       $('live-note').innerHTML = `시청 주소: <b>${chi.esc(location.origin)}/live.html?id=${s.broadcast.id}</b> · 이 화면을 닫거나 새로고침하면 방송이 종료됩니다.`;
       s.timer = setInterval(() => { $('elapsed').textContent = chi.elapsed(s.broadcast.startedAt); }, 1000);
       s.comments = chiComments.mount($('comments'), { kind: 'broadcasts', id: s.broadcast.id, ownerOf: () => s.broadcast.owner });
+      s.donations = chiDonations.mount($('donations'), { kind: 'broadcasts', id: s.broadcast.id, ownerOf: () => s.broadcast.owner });
       keepAwake();
     }
 
@@ -163,6 +166,7 @@
       if (m.type === 'ended') return finish(s.ending ? '방송을 종료했습니다.' : '방송이 종료되었습니다.');
       if (m.type === 'error') return finish(m.message);
       if (m.type === 'comment') return s.comments?.onPush(m);
+      if (m.type === 'donation') return s.donations?.onPush(m);
       if (m.type === 'title') { s.broadcast.title = m.title; $('heading').textContent = m.title; return; }
       if (m.type === 'signal') {
         const p = s.peers.get(m.from);

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>테스트 결제창</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body class="fake-pg">
+  <main>
+    <div class="donate-box">
+      <div class="pg-card">
+        <div class="pg-head"><span class="tag">TEST</span> 내장 테스트 결제창 <span class="meta">(실제 결제 없음)</span></div>
+        <p class="meta" id="order-name"></p>
+        <p class="pg-amount" id="amount"></p>
+        <p class="meta">실제 PG의 결제창 단계를 흉내 냅니다. 아래 버튼으로 결과를 고르세요.</p>
+        <div class="pg-buttons">
+          <button class="btn btn-primary" type="button" data-act="approve">결제하기 (승인 성공)</button>
+          <button class="btn" type="button" data-act="reject">카드사 승인 거절 (승인 단계 실패)</button>
+          <button class="btn" type="button" data-act="fail">결제창에서 실패</button>
+          <button class="btn" type="button" data-act="cancel">결제 취소 (창 닫기)</button>
+        </div>
+        <p class="error" id="error"></p>
+      </div>
+    </div>
+  </main>
+  <script src="/common.js"></script>
+  <script>
+    // 실제 PG처럼: 인증 성공 → successUrl?paymentKey&orderId&amount, 실패·취소 → failUrl?code&message
+    const $ = (id) => document.getElementById(id);
+    const q = new URLSearchParams(location.search);
+    const orderId = q.get('orderId');
+    const amount = Number(q.get('amount'));
+    // 같은 사이트로만 돌려보냄 (열린 리다이렉트 방지)
+    const sameOrigin = (u) => { try { return new URL(u, location.href).origin === location.origin; } catch { return false; } };
+    const successUrl = q.get('successUrl');
+    const failUrl = q.get('failUrl');
+
+    $('order-name').textContent = q.get('orderName') || '';
+    $('amount').textContent = chi.won(amount);
+    if (!orderId || !amount || !sameOrigin(successUrl) || !sameOrigin(failUrl)) {
+      $('error').textContent = '결제 요청 정보가 올바르지 않습니다.';
+      document.querySelectorAll('[data-act]').forEach((b) => { b.disabled = true; });
+    }
+
+    const go = (base, extra) => {
+      const u = new URL(base, location.href);
+      Object.entries(extra).forEach(([k, v]) => u.searchParams.set(k, v));
+      location.replace(u.toString());
+    };
+
+    document.querySelector('.pg-buttons').onclick = async (e) => {
+      const act = e.target.closest('[data-act]')?.dataset.act;
+      if (!act) return;
+      document.querySelectorAll('[data-act]').forEach((b) => { b.disabled = true; });
+      try {
+        if (act === 'approve' || act === 'reject') {
+          const { paymentKey } = await chi.api('/api/fake-pg/authorize', {
+            method: 'POST', json: { orderId, amount, reject: act === 'reject' },
+          });
+          go(successUrl, { paymentKey, orderId, amount });
+        } else if (act === 'fail') {
+          go(failUrl, { code: 'REJECT_CARD_COMPANY', message: '카드 정보를 다시 확인해주세요.', orderId });
+        } else {
+          // 토스페이먼츠와 같이, 사용자가 취소하면 orderId 없이 돌아옵니다.
+          go(failUrl, { code: 'PAY_PROCESS_CANCELED', message: '사용자에 의해 결제가 취소되었습니다' });
+        }
+      } catch (err) {
+        $('error').textContent = err.message;
+        document.querySelectorAll('[data-act]').forEach((b) => { b.disabled = false; });
+      }
+    };
+  </script>
+</body>
+</html>

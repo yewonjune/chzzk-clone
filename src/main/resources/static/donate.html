@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>치치직 - 후원하기</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="logo" href="/"><span class="logo-mark">▶</span>치치<span class="accent">직</span></a>
+    <div class="nav"><a class="btn" href="/">목록</a><span id="auth-slot"></span></div>
+  </header>
+  <main>
+    <div class="donate-box">
+      <h1>후원하기</h1>
+      <div class="notice" id="mode-notice"></div>
+
+      <div id="need-login" class="login-needed" hidden>
+        <p>후원하려면 로그인이 필요합니다.</p>
+        <a class="btn btn-primary" id="login-link" href="/auth.html">로그인</a>
+      </div>
+
+      <form id="form" class="form" hidden novalidate>
+        <div class="field">
+          <label for="target">후원할 방송</label>
+          <select id="target"></select>
+          <span class="hint" id="recipient"></span>
+        </div>
+        <div class="field">
+          <label>금액</label>
+          <div class="amounts" id="amounts"></div>
+          <input id="amount" type="number" inputmode="numeric" step="100" placeholder="직접 입력 (원)">
+          <span class="hint" id="amount-hint"></span>
+        </div>
+        <div class="field">
+          <label for="message">후원 메시지 (선택)</label>
+          <input id="message" type="text" maxlength="100" placeholder="스트리머에게 보낼 메시지 (최대 100자)">
+        </div>
+        <p class="error" id="error"></p>
+        <button class="btn btn-primary btn-pay" type="submit" id="pay">후원하기</button>
+      </form>
+    </div>
+  </main>
+  <script src="/common.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const params = new URLSearchParams(location.search);
+    const PRESETS = [1000, 3000, 5000, 10000, 50000];
+    let config = null;
+    let targets = []; // {value:'broadcast:1', type, id, title, owner, live}
+
+    (async () => {
+      try {
+        config = await chi.api('/api/payments/config');
+        $('mode-notice').innerHTML = config.provider === 'toss'
+          ? '토스페이먼츠 <b>테스트 모드</b>입니다. 결제창에 카드 정보를 넣어도 실제로 돈이 빠져나가지 않습니다.'
+          : '<b>내장 테스트 결제창</b>으로 동작합니다. (토스페이먼츠 테스트 키를 설정하면 토스 결제창이 열립니다) 실제 결제는 일어나지 않습니다.';
+        $('amount-hint').textContent = `${chi.won(config.minAmount)} ~ ${chi.won(config.maxAmount)}, ${config.amountUnit}원 단위`;
+
+        await chi.ready;
+        if (!chi.me) {
+          $('need-login').hidden = false;
+          $('login-link').href = chi.loginUrl();
+          return;
+        }
+        await loadTargets();
+        renderAmounts();
+        $('form').hidden = false;
+      } catch (e) {
+        $('error').textContent = e.message;
+        $('form').hidden = false;
+      }
+    })();
+
+    /** 후원 대상: 주소로 지정된 방송 + 방송 중인 방송 + 다시보기. 받는 사람은 그 방송의 스트리머입니다. */
+    async function loadTargets() {
+      const want = params.get('type') && params.get('id') ? `${params.get('type')}:${params.get('id')}` : null;
+      const [broadcasts, replays] = await Promise.all([
+        chi.api('/api/broadcasts').catch(() => []),
+        chi.api('/api/replays').catch(() => []),
+      ]);
+      const add = (type, b, live) => {
+        if (!b.owner || chi.isMe(b.owner)) return;
+        const value = `${type}:${b.id}`;
+        if (!targets.some((t) => t.value === value)) targets.push({ value, type, id: b.id, title: b.title, owner: b.owner, live });
+      };
+      if (want) {
+        const [type, id] = want.split(':');
+        const b = await chi.api(`/api/${type === 'broadcast' ? 'broadcasts' : 'replays'}/${encodeURIComponent(id)}`).catch(() => null);
+        if (b && chi.isMe(b.owner)) $('error').textContent = '자기 방송에는 후원할 수 없습니다.';
+        if (b) add(type, b, type === 'broadcast' && b.status === 'live');
+      }
+      broadcasts.filter((b) => b.status === 'live').forEach((b) => add('broadcast', b, true));
+      replays.forEach((r) => add('replay', r, false));
+
+      $('target').innerHTML = targets.length
+        ? targets.map((t) => `<option value="${t.value}">${t.live ? '● LIVE ' : t.type === 'replay' ? '다시보기 ' : '지난 방송 '}${chi.esc(t.title)} — ${chi.esc(t.owner.nickname)}</option>`).join('')
+        : '<option value="">후원할 수 있는 방송이 없습니다</option>';
+      if (want && targets.some((t) => t.value === want)) $('target').value = want;
+      $('target').onchange = showRecipient;
+      showRecipient();
+    }
+
+    function selected() { return targets.find((t) => t.value === $('target').value); }
+
+    function showRecipient() {
+      const t = selected();
+      $('recipient').textContent = t ? `받는 스트리머: ${t.owner.nickname}` : '';
+      $('pay').disabled = !t;
+    }
+
+    function renderAmounts() {
+      $('amounts').innerHTML = PRESETS.map((v) => `<button type="button" class="btn" data-v="${v}">${chi.won(v)}</button>`).join('');
+      $('amounts').onclick = (e) => {
+        const b = e.target.closest('[data-v]');
+        if (!b) return;
+        $('amount').value = b.dataset.v;
+        markAmount();
+      };
+      $('amount').oninput = markAmount;
+      $('amount').value = PRESETS[0];
+      markAmount();
+    }
+
+    function markAmount() {
+      [...$('amounts').children].forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.v === $('amount').value)));
+      const v = Number($('amount').value);
+      $('pay').textContent = v ? `${chi.won(v)} 후원하기` : '후원하기';
+    }
+
+    $('form').onsubmit = async (e) => {
+      e.preventDefault();
+      $('error').textContent = '';
+      const t = selected();
+      if (!t) return;
+      $('pay').disabled = true;
+      try {
+        // 1) 서버에 주문 생성: 금액·받는 사람은 서버가 고정하고 주문번호를 발급
+        const order = await chi.api('/api/donations', {
+          method: 'POST',
+          json: { targetType: t.type, targetId: t.id, amount: Number($('amount').value), message: $('message').value },
+        });
+        // 2) PG 결제창으로 이동. 결과는 donate-result.html 에서 서버가 승인 확인 후 확정
+        const back = `${location.origin}/donate-result.html`;
+        const successUrl = `${back}?result=success&order=${order.orderId}`;
+        const failUrl = `${back}?result=fail&order=${order.orderId}`;
+        if (order.provider === 'toss') await payWithToss(order, successUrl, failUrl);
+        else location.href = `/fake-pg.html?${new URLSearchParams({ orderId: order.orderId, orderName: order.orderName, amount: order.amount, successUrl, failUrl })}`;
+      } catch (err) {
+        $('error').textContent = err.status === 401 ? '로그인이 필요합니다.' : err.message;
+        $('pay').disabled = false;
+      }
+    };
+
+    function loadScript(src) {
+      return new Promise((resolve, reject) => {
+        if (window.TossPayments) return resolve();
+        const s = document.createElement('script');
+        s.src = src;
+        s.onload = resolve;
+        s.onerror = () => reject(new Error('토스페이먼츠 결제 스크립트를 불러오지 못했습니다.'));
+        document.head.append(s);
+      });
+    }
+
+    async function payWithToss(order, successUrl, failUrl) {
+      await loadScript('https://js.tosspayments.com/v2/standard');
+      const payment = TossPayments(order.clientKey).payment({ customerKey: TossPayments.ANONYMOUS });
+      try {
+        await payment.requestPayment({
+          method: 'CARD',
+          amount: { currency: 'KRW', value: order.amount },
+          orderId: order.orderId,
+          orderName: order.orderName,
+          successUrl,
+          failUrl,
+        });
+      } catch (err) {
+        // PC 결제창을 닫는 등 리다이렉트 없이 끝난 경우: 실패 화면과 같은 처리
+        location.href = `${failUrl}&${new URLSearchParams({ code: err.code || 'PAY_PROCESS_ABORTED', message: err.message || '' })}`;
+      }
+    }
+  </script>
+</body>
+</html>

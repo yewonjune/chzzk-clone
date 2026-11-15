@@ -35,6 +35,7 @@
         <div class="controls"><button class="btn btn-primary" type="submit">저장</button><button class="btn" type="button" id="btn-cancel">취소</button></div>
       </form>
 
+      <div class="donations-wrap" id="donations"></div>
       <div class="comments-wrap" id="comments"></div>
     </section>
     <p id="error" class="error"></p>
@@ -42,6 +43,7 @@
   </main>
   <script src="/common.js"></script>
   <script src="/comments.js"></script>
+  <script src="/donations.js"></script>
   <script>
     const { api, duration, views } = chi;
     const $ = (id) => document.getElementById(id);
@@ -70,6 +72,7 @@
         });
         $('watch').hidden = false;
         chiComments.mount($('comments'), { kind: 'replays', id: b.id, ownerOf: () => b.owner });
+        chiDonations.mount($('donations'), { kind: 'replays', id: b.id, ownerOf: () => b.owner });
         chi.ready.then(() => { $('owner-bar').hidden = !chi.isMe(b.owner); });
         // 상세 화면 진입 시 조회수 1 증가 (실패해도 시청에는 영향 없음)
         api(`/api/replays/${b.id}/views`, { method: 'POST' })

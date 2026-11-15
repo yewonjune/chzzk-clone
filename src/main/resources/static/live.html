@@ -37,6 +37,7 @@
         <button class="btn btn-danger" type="button" id="btn-delete" hidden>기록 삭제</button>
       </div>
 
+      <div class="donations-wrap" id="donations"></div>
       <div class="comments-wrap" id="comments"></div>
     </section>
     <p id="error" class="error"></p>
@@ -44,10 +45,11 @@
   </main>
   <script src="/common.js"></script>
   <script src="/comments.js"></script>
+  <script src="/donations.js"></script>
   <script>
     const $ = (id) => document.getElementById(id);
     const id = new URLSearchParams(location.search).get('id');
-    let b = null, pc = null, ws = null, pending = [], timer = null, done = false, comments = null;
+    let b = null, pc = null, ws = null, pending = [], timer = null, done = false, comments = null, donations = null;
 
     (async () => {
       try {
@@ -58,6 +60,7 @@
         $('started').textContent = `${chi.time(b.startedAt)} 시작`;
         $('view').hidden = false;
         comments = chiComments.mount($('comments'), { kind: 'broadcasts', id: b.id, ownerOf: () => b.owner });
+        donations = chiDonations.mount($('donations'), { kind: 'broadcasts', id: b.id, ownerOf: () => b.owner });
         chi.ready.then(updateOwnerBar);
         if (b.status === 'ended') return showEnded('종료된 방송입니다.');
 
@@ -95,6 +98,8 @@
           showEnded('방송이 종료되었습니다.');
         } else if (m.type === 'comment') {
           comments?.onPush(m);
+        } else if (m.type === 'donation') {
+          donations?.onPush(m);
         } else if (m.type === 'title') {
           setTitle(m.title);
         } else if (m.type === 'signal') {

@@ -34,6 +34,8 @@ import jakarta.servlet.http.HttpServletResponse;
 @Configuration
 public class SecurityConfig {
 
+    static final String WEBHOOK = "/api/payments/webhook";
+
     @Bean
     PasswordEncoder passwordEncoder() {
         return new BCryptPasswordEncoder();
@@ -66,10 +68,13 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.POST, "/api/auth/signup", "/api/auth/login").permitAll()
                 // 다시보기 조회수는 시청 행위라 비로그인도 허용
                 .requestMatchers(HttpMethod.POST, "/api/replays/*/views").permitAll()
+                // PG 서버가 보내는 결제 웹훅: 로그인 세션이 없음. 본문은 믿지 않고 PG에 다시 조회해 처리
+                .requestMatchers(HttpMethod.POST, WEBHOOK).permitAll()
                 .requestMatchers(HttpMethod.GET, "/api/**").permitAll()
                 .requestMatchers("/api/**").authenticated()
                 .anyRequest().permitAll())   // 정적 화면, /media/**, /ws/** (송출자 권한은 시그널링에서 검사)
             .csrf(csrf -> csrf
+                .ignoringRequestMatchers(WEBHOOK) // 브라우저가 아닌 PG 서버의 호출이라 CSRF 토큰이 없음
                 .csrfTokenRepository(csrfTokenRepository)
                 // 화면이 받은 토큰 값을 그대로 헤더로 보내는 방식 (XOR 마스킹 없이)
                 .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler()))
