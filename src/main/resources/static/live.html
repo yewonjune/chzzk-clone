@@ -9,7 +9,7 @@
 <body>
   <header class="topbar">
     <a class="logo" href="/"><span class="logo-mark">▶</span>치치<span class="accent">직</span></a>
-    <div class="nav"><a class="btn btn-live" href="/go-live.html">● 방송 시작</a></div>
+    <div class="nav"><a class="btn btn-live" href="/go-live.html">● 방송 시작</a><span id="auth-slot"></span></div>
   </header>
   <main>
     <section id="view" hidden>
@@ -29,25 +29,36 @@
         <span id="elapsed"></span>
       </div>
       <div class="summary" id="summary" hidden></div>
+
+      <!-- 소유자에게만 보이는 제어 (서버도 소유자만 허용) -->
+      <div class="owner-bar" id="owner-bar" hidden>
+        <span class="meta">내 방송</span>
+        <button class="btn" type="button" id="btn-rename">제목 수정</button>
+        <button class="btn btn-danger" type="button" id="btn-delete" hidden>기록 삭제</button>
+      </div>
+
+      <div class="comments-wrap" id="comments"></div>
     </section>
     <p id="error" class="error"></p>
     <a class="btn" href="/">← 목록으로</a>
   </main>
   <script src="/common.js"></script>
+  <script src="/comments.js"></script>
   <script>
     const $ = (id) => document.getElementById(id);
     const id = new URLSearchParams(location.search).get('id');
-    let b = null, pc = null, ws = null, pending = [], timer = null, done = false;
+    let b = null, pc = null, ws = null, pending = [], timer = null, done = false, comments = null;
 
     (async () => {
       try {
         if (!id) throw new Error('방송을 찾을 수 없습니다.');
         b = await chi.api(`/api/broadcasts/${encodeURIComponent(id)}`);
-        document.title = `${b.title} - 치치직`;
-        $('title').textContent = b.title;
-        $('streamer').textContent = b.streamer || '익명 스트리머';
+        setTitle(b.title);
+        $('streamer').textContent = chi.name(b);
         $('started').textContent = `${chi.time(b.startedAt)} 시작`;
         $('view').hidden = false;
+        comments = chiComments.mount($('comments'), { kind: 'broadcasts', id: b.id, ownerOf: () => b.owner });
+        chi.ready.then(updateOwnerBar);
         if (b.status === 'ended') return showEnded('종료된 방송입니다.');
 
         const config = await chi.api('/api/live-config').catch(() => ({ iceServers: [] }));
@@ -57,6 +68,17 @@
         $('error').textContent = e.message;
       }
     })();
+
+    function setTitle(t) {
+      b.title = t;
+      document.title = `${t} - 치치직`;
+      $('title').textContent = t;
+    }
+
+    function updateOwnerBar() {
+      $('owner-bar').hidden = !chi.isMe(b.owner);
+      $('btn-delete').hidden = b.status !== 'ended'; // 방송 중에는 삭제 불가 (서버도 409)
+    }
 
     function connect(iceServers) {
       ws = new WebSocket(chi.wsUrl(`/ws/broadcasts/${b.id}`));
@@ -71,6 +93,10 @@
           stop();
         } else if (m.type === 'ended') {
           showEnded('방송이 종료되었습니다.');
+        } else if (m.type === 'comment') {
+          comments?.onPush(m);
+        } else if (m.type === 'title') {
+          setTitle(m.title);
         } else if (m.type === 'signal') {
           await onSignal(m.data, iceServers);
         }
@@ -116,6 +142,23 @@
       $('btn-unmute').hidden = true;
     });
 
+    $('btn-rename').onclick = async () => {
+      const title = prompt('방송 제목', b.title);
+      if (title == null || !title.trim()) return;
+      try {
+        const updated = await chi.api(`/api/broadcasts/${b.id}`, { method: 'PATCH', json: { title } });
+        setTitle(updated.title);
+      } catch (err) { $('error').textContent = err.message; }
+    };
+
+    $('btn-delete').onclick = async () => {
+      if (!confirm('이 방송 기록을 삭제할까요? 댓글도 함께 삭제되며 되돌릴 수 없습니다.')) return;
+      try {
+        await chi.api(`/api/broadcasts/${b.id}`, { method: 'DELETE' });
+        location.replace('/');
+      } catch (err) { $('error').textContent = err.message; }
+    };
+
     async function showEnded(message) {
       stop();
       overlay(message);
@@ -126,11 +169,13 @@
       $('btn-unmute').hidden = true;
       $('player').srcObject = null;
       const latest = await chi.api(`/api/broadcasts/${b.id}`).catch(() => b);
+      b.status = latest.status;
+      updateOwnerBar();
       $('elapsed').textContent = '';
       $('summary').hidden = false;
       $('summary').innerHTML = `<div>방송 시간 <b>${chi.elapsed(latest.startedAt, latest.endedAt || new Date().toISOString())}</b></div>
         <div>시작 ${chi.time(latest.startedAt)}${latest.endedAt ? ` · 종료 ${chi.time(latest.endedAt)}` : ''}</div>
-        <div>방송은 녹화되지 않아 다시 볼 수 없습니다.</div>`;
+        <div>방송은 녹화되지 않아 다시 볼 수 없습니다. 댓글은 남아 있습니다.</div>`;
     }
 
     function overlay(text) {

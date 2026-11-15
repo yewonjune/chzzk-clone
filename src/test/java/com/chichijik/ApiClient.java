@@ -1,0 +1,213 @@
+package com.chichijik;
+
+import java.io.ByteArrayOutputStream;
+import java.net.CookieManager;
+import java.net.CookiePolicy;
+import java.net.HttpCookie;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.net.http.WebSocket;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+
+import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.web.server.context.WebServerApplicationContext;
+import org.springframework.context.ConfigurableApplicationContext;
+
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
+
+/**
+ * 테스트용 브라우저 흉내: 사용자마다 세션 쿠키와 CSRF 토큰을 따로 들고 실제 서버에 요청합니다.
+ * (비로그인 / 소유자 / 다른 사용자를 각각 별도 ApiClient 로 만듭니다.)
+ */
+final class ApiClient {
+
+    static final JsonMapper JSON = JsonMapper.builder().build();
+    static final Duration WAIT = Duration.ofSeconds(5);
+
+    final String base;
+    final CookieManager cookies = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
+    final HttpClient http = HttpClient.newBuilder().cookieHandler(cookies).build();
+    private String csrfHeader;
+    private String csrfToken;
+    JsonNode user;
+
+    private ApiClient(String base) {
+        this.base = base;
+    }
+
+    // ---- 서버 기동 ----
+
+    static ConfigurableApplicationContext startServer(Path dataDir, String... extra) {
+        String[] args = new String[extra.length + 2];
+        args[0] = "--server.port=0";
+        args[1] = "--app.data-dir=" + dataDir.toString().replace('\\', '/');
+        System.arraycopy(extra, 0, args, 2, extra.length);
+        // 명령행 인자는 application.properties 보다 우선하므로 임시 폴더만 사용합니다.
+        return new SpringApplicationBuilder(ChichijikApplication.class).run(args);
+    }
+
+    static String baseUrl(ConfigurableApplicationContext app) {
+        return "http://localhost:" + ((WebServerApplicationContext) app).getWebServer().getPort();
+    }
+
+    /** 비로그인 사용자 (CSRF 토큰은 받아 둠 → 거절 사유가 CSRF 가 아니라 '로그인 필요'인지 확인 가능) */
+    static ApiClient anonymous(String base) throws Exception {
+        ApiClient c = new ApiClient(base);
+        c.refreshMe();
+        return c;
+    }
+
+    static ApiClient signUp(String base, String username, String nickname) throws Exception {
+        ApiClient c = anonymous(base);
+        HttpResponse<String> res = c.postJson("/api/auth/signup",
+                "{\"username\":\"" + username + "\",\"password\":\"password123\",\"nickname\":\"" + nickname + "\"}");
+        if (res.statusCode() != 201) throw new AssertionError("가입 실패: " + res.statusCode() + " " + res.body());
+        c.applySession(JSON.readTree(res.body()));
+        return c;
+    }
+
+    void refreshMe() throws Exception {
+        applySession(JSON.readTree(get("/api/auth/me").body()));
+    }
+
+    void applySession(JsonNode body) {
+        user = body.get("user");
+        JsonNode csrf = body.get("csrf");
+        if (csrf != null && !csrf.isNull()) {
+            csrfHeader = csrf.get("headerName").asString();
+            csrfToken = csrf.get("token").asString();
+        }
+    }
+
+    long userId() {
+        return user.get("id").asLong();
+    }
+
+    // ---- HTTP ----
+
+    HttpResponse<String> get(String path) throws Exception {
+        return http.send(HttpRequest.newBuilder(URI.create(base + path)).build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    HttpResponse<String> postJson(String path, String json) throws Exception {
+        return send("POST", path, json);
+    }
+
+    HttpResponse<String> patchJson(String path, String json) throws Exception {
+        return send("PATCH", path, json);
+    }
+
+    HttpResponse<String> post(String path) throws Exception {
+        return send("POST", path, null);
+    }
+
+    HttpResponse<String> delete(String path) throws Exception {
+        return send("DELETE", path, null);
+    }
+
+    /** CSRF 헤더 없이 보내기 (CSRF 보호 확인용) */
+    HttpResponse<String> postJsonWithoutCsrf(String path, String json) throws Exception {
+        return http.send(HttpRequest.newBuilder(URI.create(base + path)).header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(json)).build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private HttpResponse<String> send(String method, String path, String json) throws Exception {
+        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(base + path));
+        if (csrfToken != null) b.header(csrfHeader, csrfToken);
+        if (json != null) {
+            b.header("Content-Type", "application/json").method(method, HttpRequest.BodyPublishers.ofString(json));
+        } else {
+            b.method(method, HttpRequest.BodyPublishers.noBody());
+        }
+        return http.send(b.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    record FilePart(String filename, String contentType, byte[] data) {
+    }
+
+    HttpResponse<String> postMultipart(String path, Map<String, Object> fields) throws Exception {
+        String boundary = "----chichijik" + UUID.randomUUID();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        for (var e : fields.entrySet()) {
+            out.write(("--" + boundary + "\r\n").getBytes(StandardCharsets.UTF_8));
+            if (e.getValue() instanceof FilePart f) {
+                out.write(("Content-Disposition: form-data; name=\"" + e.getKey() + "\"; filename=\"" + f.filename() + "\"\r\n"
+                        + "Content-Type: " + f.contentType() + "\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+                out.write(f.data());
+            } else {
+                out.write(("Content-Disposition: form-data; name=\"" + e.getKey() + "\"\r\n\r\n" + e.getValue())
+                        .getBytes(StandardCharsets.UTF_8));
+            }
+            out.write("\r\n".getBytes(StandardCharsets.UTF_8));
+        }
+        out.write(("--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
+        HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(base + path))
+                .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+                .POST(HttpRequest.BodyPublishers.ofByteArray(out.toByteArray()));
+        if (csrfToken != null) b.header(csrfHeader, csrfToken);
+        return http.send(b.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    static JsonNode json(HttpResponse<String> res) {
+        return JSON.readTree(res.body());
+    }
+
+    // ---- WebSocket (이 사용자의 세션 쿠키를 실어 연결) ----
+
+    Socket socket(String path) {
+        Socket s = new Socket();
+        String cookieHeader = cookies.getCookieStore().getCookies().stream()
+                .map(HttpCookie::toString).collect(Collectors.joining("; "));
+        WebSocket.Builder b = HttpClient.newHttpClient().newWebSocketBuilder();
+        if (!cookieHeader.isEmpty()) b.header("Cookie", cookieHeader);
+        s.ws = b.buildAsync(URI.create(base.replace("http", "ws") + path), s).join();
+        return s;
+    }
+
+    /** 받은 메시지를 큐에 쌓아 두고 type 으로 기다리는 WebSocket 클라이언트 */
+    static final class Socket implements WebSocket.Listener {
+        WebSocket ws;
+        final BlockingQueue<JsonNode> inbox = new LinkedBlockingQueue<>();
+        private final StringBuilder partial = new StringBuilder();
+
+        void send(String text) {
+            ws.sendText(text, true).join();
+        }
+
+        JsonNode next(String type) throws InterruptedException {
+            long deadline = System.nanoTime() + WAIT.toNanos();
+            while (System.nanoTime() < deadline) {
+                JsonNode m = inbox.poll(50, TimeUnit.MILLISECONDS);
+                if (m != null && type.equals(m.get("type").asString())) return m;
+            }
+            throw new AssertionError("메시지를 받지 못함: " + type);
+        }
+
+        void close() {
+            ws.sendClose(WebSocket.NORMAL_CLOSURE, "bye").join();
+        }
+
+        @Override
+        public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
+            partial.append(data);
+            if (last) {
+                inbox.add(JSON.readTree(partial.toString()));
+                partial.setLength(0);
+            }
+            webSocket.request(1);
+            return null;
+        }
+    }
+}

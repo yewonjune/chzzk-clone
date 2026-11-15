@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,10 +14,13 @@ import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import com.chichijik.common.AfterCommit;
 import com.chichijik.common.ApiException;
+import com.chichijik.common.Ownership;
+import com.chichijik.user.LoginUser;
+import com.chichijik.user.User;
+import com.chichijik.user.UserRepository;
 
 @Service
 public class BroadcastService {
@@ -27,10 +31,12 @@ public class BroadcastService {
     static final Duration HOST_CONNECT_GRACE = Duration.ofSeconds(30);
 
     private final BroadcastRepository repository;
+    private final UserRepository users;
     private final LiveRooms rooms;
 
-    public BroadcastService(BroadcastRepository repository, LiveRooms rooms) {
+    public BroadcastService(BroadcastRepository repository, UserRepository users, LiveRooms rooms) {
         this.repository = repository;
+        this.users = users;
         this.rooms = rooms;
     }
 
@@ -49,40 +55,54 @@ public class BroadcastService {
 
     @Transactional(readOnly = true)
     public BroadcastResponse get(long id) {
+        return BroadcastResponse.from(find(id), rooms.viewerCount(id));
+    }
+
+    /** 방송 시작: 로그인 사용자가 소유자(스트리머)가 됩니다. */
+    @Transactional
+    public BroadcastResponse start(LoginUser me, String rawTitle) {
+        Ownership.requireLogin(me);
+        String title = validTitle(rawTitle);
+        User owner = users.findById(me.id()).orElseThrow(() -> ApiException.notFound("사용자를 찾을 수 없습니다."));
+        Broadcast b = repository.save(new Broadcast(owner, title, Instant.now()));
+        return BroadcastResponse.from(b, 0);
+    }
+
+    /** 제목 수정: 소유자만. 방송 중이면 시청자 화면에도 바로 반영 */
+    @Transactional
+    public BroadcastResponse rename(long id, LoginUser me, String rawTitle) {
         Broadcast b = find(id);
+        Ownership.requireOwner(b.getOwner(), me, "이 방송을 수정할 권한이 없습니다.");
+        String title = validTitle(rawTitle);
+        b.rename(title);
+        if (b.isLive()) AfterCommit.run(() -> rooms.sendToAll(id, Map.of("type", "title", "title", title)));
         return BroadcastResponse.from(b, rooms.viewerCount(id));
     }
 
+    /** 종료: 소유자만. 이미 종료됐으면 그대로 성공 */
     @Transactional
-    public BroadcastResponse.Started start(String rawTitle, String rawStreamer) {
-        String title = rawTitle == null ? "" : rawTitle.trim();
-        String streamer = rawStreamer == null ? "" : rawStreamer.trim();
-        if (title.isEmpty()) throw ApiException.badRequest("방송 제목을 입력해 주세요.");
-        if (title.length() > 100) throw ApiException.badRequest("방송 제목은 100자 이하로 입력해 주세요.");
-        if (streamer.length() > 40) throw ApiException.badRequest("스트리머 이름은 40자 이하로 입력해 주세요.");
-
-        String key = StreamKeys.generate();
-        Broadcast b = repository.save(new Broadcast(title, streamer, StreamKeys.hash(key), Instant.now()));
-        return new BroadcastResponse.Started(BroadcastResponse.from(b, 0), key);
-    }
-
-    /** 송출 키를 가진 쪽(방송을 시작한 기기)만 종료할 수 있습니다. 이미 종료됐으면 그대로 성공. */
-    @Transactional
-    public BroadcastResponse end(long id, String streamKey) {
+    public BroadcastResponse end(long id, LoginUser me) {
         Broadcast b = find(id);
-        if (!StreamKeys.matches(streamKey, b.getStreamKeyHash())) {
-            throw new ApiException(HttpStatus.FORBIDDEN, "이 방송을 종료할 권한이 없습니다.");
-        }
+        Ownership.requireOwner(b.getOwner(), me, "이 방송을 종료할 권한이 없습니다.");
         endAndClose(b);
         return BroadcastResponse.from(b, 0);
     }
 
-    /** 송출 키가 이 방송의 것인지 (시그널링 연결 시 송출자 확인용) */
+    /** 기록 삭제: 소유자만, 종료된 방송만. 댓글은 DB에서 함께 삭제(ON DELETE CASCADE) */
+    @Transactional
+    public void delete(long id, LoginUser me) {
+        Broadcast b = find(id);
+        Ownership.requireOwner(b.getOwner(), me, "이 방송을 삭제할 권한이 없습니다.");
+        if (b.isLive()) throw new ApiException(HttpStatus.CONFLICT, "방송 중에는 삭제할 수 없습니다. 먼저 방송을 종료해 주세요.");
+        repository.delete(b);
+    }
+
+    /** 송출자 연결 허용 여부: 방송 중이고, 연결한 사용자가 소유자일 때만 */
     @Transactional(readOnly = true)
-    public boolean isLiveAndKeyMatches(long id, String streamKey) {
-        return repository.findById(id)
+    public boolean canHost(long id, LoginUser me) {
+        return repository.findWithOwnerById(id)
                 .filter(Broadcast::isLive)
-                .filter(b -> StreamKeys.matches(streamKey, b.getStreamKeyHash()))
+                .filter(b -> Ownership.isOwner(b.getOwner(), me))
                 .isPresent();
     }
 
@@ -125,19 +145,17 @@ public class BroadcastService {
     private void endAndClose(Broadcast b) {
         b.end(Instant.now());
         long id = b.getId();
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    rooms.close(id);
-                }
-            });
-        } else {
-            rooms.close(id);
-        }
+        AfterCommit.run(() -> rooms.close(id));
+    }
+
+    private static String validTitle(String raw) {
+        String title = raw == null ? "" : raw.trim();
+        if (title.isEmpty()) throw ApiException.badRequest("방송 제목을 입력해 주세요.");
+        if (title.length() > 100) throw ApiException.badRequest("방송 제목은 100자 이하로 입력해 주세요.");
+        return title;
     }
 
     private Broadcast find(long id) {
-        return repository.findById(id).orElseThrow(() -> ApiException.notFound(NOT_FOUND));
+        return repository.findWithOwnerById(id).orElseThrow(() -> ApiException.notFound(NOT_FOUND));
     }
 }

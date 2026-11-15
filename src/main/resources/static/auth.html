@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>치치직 - 로그인</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="logo" href="/"><span class="logo-mark">▶</span>치치<span class="accent">직</span></a>
+    <div class="nav"><a class="btn" href="/">목록</a></div>
+  </header>
+  <main>
+    <div class="auth-box">
+      <div class="tabs" role="tablist">
+        <button type="button" class="btn" role="tab" data-mode="login" aria-selected="true">로그인</button>
+        <button type="button" class="btn" role="tab" data-mode="signup" aria-selected="false">회원가입</button>
+      </div>
+      <form id="form" class="form" novalidate>
+        <div class="field">
+          <label for="username">아이디</label>
+          <input id="username" type="text" autocomplete="username" maxlength="20" autocapitalize="none" required>
+          <span class="hint" data-signup hidden>영문 소문자·숫자·_ 4~20자</span>
+        </div>
+        <div class="field" data-signup hidden>
+          <label for="nickname">닉네임</label>
+          <input id="nickname" type="text" maxlength="20" placeholder="화면에 보이는 이름 (2~20자)">
+        </div>
+        <div class="field">
+          <label for="password">비밀번호</label>
+          <input id="password" type="password" autocomplete="current-password" maxlength="72" required>
+          <span class="hint" data-signup hidden>8자 이상</span>
+        </div>
+        <p class="error" id="error"></p>
+        <button class="btn btn-primary" type="submit" id="submit">로그인</button>
+      </form>
+    </div>
+  </main>
+  <script src="/common.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const params = new URLSearchParams(location.search);
+    // 로그인 후 돌아갈 주소: 같은 사이트 내부 경로만 허용 (외부 주소로 보내는 오픈 리다이렉트 방지)
+    const rawNext = params.get('next') || '/';
+    const next = rawNext.startsWith('/') && !rawNext.startsWith('//') ? rawNext : '/';
+    let mode = params.get('mode') === 'signup' ? 'signup' : 'login';
+
+    function setMode(m) {
+      mode = m;
+      document.querySelectorAll('[data-mode]').forEach((b) => b.setAttribute('aria-selected', b.dataset.mode === m));
+      document.querySelectorAll('[data-signup]').forEach((el) => { el.hidden = m !== 'signup'; });
+      $('submit').textContent = m === 'signup' ? '가입하고 로그인' : '로그인';
+      $('password').autocomplete = m === 'signup' ? 'new-password' : 'current-password';
+      document.title = `치치직 - ${m === 'signup' ? '회원가입' : '로그인'}`;
+      $('error').textContent = '';
+    }
+    document.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
+    setMode(mode);
+
+    chi.ready.then(() => { if (chi.me) location.replace(next); });
+
+    $('form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      $('error').textContent = '';
+      const body = { username: $('username').value.trim(), password: $('password').value };
+      if (mode === 'signup') body.nickname = $('nickname').value.trim();
+      $('submit').disabled = true;
+      try {
+        const res = await chi.api(`/api/auth/${mode}`, { method: 'POST', json: body });
+        chi.setSession(res);
+        location.replace(next);
+      } catch (err) {
+        $('error').textContent = err.message;
+        $('submit').disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -9,18 +9,19 @@
 <body>
   <header class="topbar">
     <a class="logo" href="/"><span class="logo-mark">▶</span>치치<span class="accent">직</span></a>
-    <a class="btn" href="/">목록</a>
+    <div class="nav"><a class="btn" href="/">목록</a><span id="auth-slot"></span></div>
   </header>
   <main>
     <h1>다시보기 등록</h1>
-    <form id="form" class="form" novalidate>
+    <div class="notice login-needed" id="need-login" hidden>
+      <p>다시보기를 등록하려면 로그인해야 합니다.</p>
+      <a class="btn btn-primary" id="login-link" href="/auth.html">로그인 / 회원가입</a>
+    </div>
+    <form id="form" class="form" novalidate hidden>
+      <p class="meta" id="owner-note"></p>
       <div class="field">
         <label for="title">제목 *</label>
         <input id="title" name="title" type="text" maxlength="100" required placeholder="예) 새벽 3시 랭크 게임 풀영상">
-      </div>
-      <div class="field">
-        <label for="streamer">스트리머</label>
-        <input id="streamer" name="streamer" type="text" maxlength="40" placeholder="비워두면 '익명 스트리머'">
       </div>
       <div class="field">
         <label>영상 *</label>
@@ -57,6 +58,14 @@
     let file = null;
     let durationSec = null;
     let objectUrl = null;
+
+    // 등록은 로그인한 사용자만 (서버도 401로 거절). 등록한 사용자가 스트리머(소유자)가 됩니다.
+    chi.ready.then(() => {
+      $('need-login').hidden = !!chi.me;
+      $('form').hidden = !chi.me;
+      $('login-link').href = chi.loginUrl();
+      if (chi.me) $('owner-note').textContent = `스트리머: ${chi.me.nickname} (등록한 사용자만 수정·삭제할 수 있습니다)`;
+    });
 
     document.querySelectorAll('[data-mode]').forEach((btn) => btn.addEventListener('click', () => {
       mode = btn.dataset.mode;
@@ -99,7 +108,6 @@
       if (!title) return showError('제목을 입력해 주세요.');
       const fd = new FormData();
       fd.append('title', title);
-      fd.append('streamer', $('streamer').value.trim());
       fd.append('description', $('description').value.trim());
       if (durationSec) fd.append('durationSec', String(durationSec));
       if (mode === 'upload') {
@@ -127,6 +135,7 @@
       };
       xhr.onerror = () => { done(); showError('네트워크 오류로 등록하지 못했습니다.'); };
       xhr.open('POST', '/api/replays');
+      if (chi.csrf) xhr.setRequestHeader(chi.csrf.headerName, chi.csrf.token);
       xhr.send(fd);
 
       function done() { $('submit').disabled = false; bar.hidden = true; }

@@ -167,3 +167,33 @@ section + section { margin-top: 36px; }
   .stage.portrait { aspect-ratio: 3 / 4; }
   .nav .btn { padding: 8px 10px; font-size: 14px; }
 }
+
+/* ---- 3단계: 로그인·소유자 제어·댓글 ---- */
+.nav { align-items: center; }
+#auth-slot { display: inline-flex; align-items: center; gap: 8px; }
+#auth-slot .me { color: var(--muted); font-size: 14px; max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.auth-box { max-width: 420px; margin: 24px auto; display: grid; gap: 18px; }
+input[type=password] {
+  width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); font: inherit;
+}
+.owner-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px;
+  padding: 10px 12px; border: 1px dashed var(--border); border-radius: var(--radius);
+}
+.owner-bar .meta { margin-right: auto; }
+.edit-form { display: grid; gap: 10px; margin-top: 12px; }
+.comments-wrap { margin-top: 28px; }
+.comment-form { display: flex; gap: 8px; align-items: flex-end; }
+.comment-form textarea { min-height: 44px; }
+.comments { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 4px; }
+.comment { padding: 10px 12px; border-radius: 8px; background: var(--surface); }
+.comment-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; font-size: 14px; }
+.comment-actions { margin-left: auto; display: inline-flex; gap: 8px; }
+.comment-body { margin-top: 4px; white-space: pre-wrap; word-break: break-word; font-size: 14px; }
+.tag { font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 4px; background: var(--accent); color: var(--accent-ink); }
+button.link { background: none; border: 0; padding: 0; color: var(--muted); font: inherit; font-size: 13px; cursor: pointer; }
+button.link:hover { color: var(--text); text-decoration: underline; }
+.login-needed { text-align: center; padding: 40px 16px; }
+/* 송출 화면: 방송 중 댓글을 영상 아래에 */
+.live-comments .comments { max-height: 40vh; overflow-y: auto; }

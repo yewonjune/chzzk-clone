@@ -13,10 +13,16 @@ import java.util.Set;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 
 import com.chichijik.common.ApiException;
+import com.chichijik.common.Ownership;
 import com.chichijik.config.MediaConfig;
+import com.chichijik.user.LoginUser;
+import com.chichijik.user.User;
+import com.chichijik.user.UserRepository;
 
 @Service
 public class ReplayService {
@@ -26,10 +32,12 @@ public class ReplayService {
     private static final String NOT_FOUND = "다시보기를 찾을 수 없습니다.";
 
     private final ReplayRepository repository;
+    private final UserRepository users;
     private final Path uploadDir;
 
-    public ReplayService(ReplayRepository repository, MediaConfig mediaConfig) {
+    public ReplayService(ReplayRepository repository, UserRepository users, MediaConfig mediaConfig) {
         this.repository = repository;
+        this.users = users;
         this.uploadDir = mediaConfig.uploadDir();
     }
 
@@ -40,8 +48,7 @@ public class ReplayService {
 
     @Transactional(readOnly = true)
     public ReplayResponse get(long id) {
-        return repository.findById(id).map(ReplayResponse::from)
-                .orElseThrow(() -> ApiException.notFound(NOT_FOUND));
+        return ReplayResponse.from(find(id));
     }
 
     @Transactional
@@ -51,28 +58,65 @@ public class ReplayService {
         return b.getViews();
     }
 
-    /** 등록: 영상 파일(video) 업로드 또는 영상 주소(videoUrl) 연결 중 하나 */
+    /** 수정(제목·설명): 소유자만 */
     @Transactional
-    public ReplayResponse create(String rawTitle, String rawStreamer, String rawDescription,
-                                    String rawVideoUrl, String rawDurationSec, MultipartFile video) {
+    public ReplayResponse edit(long id, LoginUser me, String rawTitle, String rawDescription) {
+        Replay r = find(id);
+        Ownership.requireOwner(r.getOwner(), me, "이 다시보기를 수정할 권한이 없습니다.");
         String title = trim(rawTitle);
-        String streamer = trim(rawStreamer);
+        String description = trim(rawDescription);
+        validateText(title, description);
+        r.edit(title, description);
+        return ReplayResponse.from(r);
+    }
+
+    /** 삭제: 소유자만. 댓글은 DB에서 함께 삭제(ON DELETE CASCADE), 업로드 파일은 커밋 후 삭제 */
+    @Transactional
+    public void delete(long id, LoginUser me) {
+        Replay r = find(id);
+        Ownership.requireOwner(r.getOwner(), me, "이 다시보기를 삭제할 권한이 없습니다.");
+        repository.delete(r);
+        if (r.getSourceType() == Replay.SourceType.UPLOAD) {
+            Path file = uploadDir.resolve(r.getVideoPath());
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    deleteQuietly(file);
+                }
+            });
+        }
+    }
+
+    private Replay find(long id) {
+        return repository.findWithOwnerById(id).orElseThrow(() -> ApiException.notFound(NOT_FOUND));
+    }
+
+    private static void validateText(String title, String description) {
+        if (title.isEmpty()) throw ApiException.badRequest("제목을 입력해 주세요.");
+        if (title.length() > 100) throw ApiException.badRequest("제목은 100자 이하로 입력해 주세요.");
+        if (description.length() > 2000) throw ApiException.badRequest("설명은 2000자 이하로 입력해 주세요.");
+    }
+
+    /** 등록: 로그인 사용자가 소유자가 됩니다. 영상 파일(video) 업로드 또는 영상 주소(videoUrl) 연결 중 하나 */
+    @Transactional
+    public ReplayResponse create(LoginUser me, String rawTitle, String rawDescription,
+                                 String rawVideoUrl, String rawDurationSec, MultipartFile video) {
+        Ownership.requireLogin(me);
+        String title = trim(rawTitle);
         String description = trim(rawDescription);
         String videoUrl = trim(rawVideoUrl);
         boolean hasFile = video != null && !video.isEmpty();
 
-        if (title.isEmpty()) throw ApiException.badRequest("제목을 입력해 주세요.");
-        if (title.length() > 100) throw ApiException.badRequest("제목은 100자 이하로 입력해 주세요.");
-        if (streamer.length() > 40) throw ApiException.badRequest("스트리머 이름은 40자 이하로 입력해 주세요.");
-        if (description.length() > 2000) throw ApiException.badRequest("설명은 2000자 이하로 입력해 주세요.");
+        validateText(title, description);
         if (hasFile && !videoUrl.isEmpty()) throw ApiException.badRequest("영상 파일과 영상 주소 중 하나만 입력해 주세요.");
         if (!hasFile && videoUrl.isEmpty()) throw ApiException.badRequest("영상 파일을 올리거나 영상 주소를 입력해 주세요.");
 
         Double duration = parseDuration(rawDurationSec);
+        User owner = users.findById(me.id()).orElseThrow(() -> ApiException.notFound("사용자를 찾을 수 없습니다."));
 
         if (!hasFile) {
             String url = validateUrl(videoUrl);
-            Replay b = new Replay(title, streamer, description, Replay.SourceType.URL, url, null, null, duration);
+            Replay b = new Replay(owner, title, description, Replay.SourceType.URL, url, null, null, duration);
             return ReplayResponse.from(repository.save(b));
         }
 
@@ -91,7 +135,7 @@ public class ReplayService {
         }
 
         try {
-            Replay b = new Replay(title, streamer, description, Replay.SourceType.UPLOAD,
+            Replay b = new Replay(owner, title, description, Replay.SourceType.UPLOAD,
                     fileName, contentType, video.getSize(), duration);
             return ReplayResponse.from(repository.saveAndFlush(b));
         } catch (RuntimeException e) {

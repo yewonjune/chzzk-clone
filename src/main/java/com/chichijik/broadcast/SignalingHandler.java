@@ -3,6 +3,7 @@ package com.chichijik.broadcast;
 import java.util.Map;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.core.Authentication;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
@@ -10,13 +11,15 @@ import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
+import com.chichijik.user.LoginUser;
+
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
  * /ws/broadcasts/{id} WebRTC 시그널링.
  * 연결 직후 첫 메시지로 역할을 밝힙니다.
- *   송출자: {"type":"join","role":"host","streamKey":"..."}
+ *   송출자: {"type":"join","role":"host"}   ← 로그인 세션의 사용자가 방송 소유자여야 함
  *   시청자: {"type":"join","role":"viewer"}
  * 이후에는 signal 메시지(SDP offer/answer, ICE candidate)를 상대에게 그대로 전달합니다.
  */
@@ -84,8 +87,11 @@ public class SignalingHandler extends TextWebSocketHandler {
 
     private void join(WebSocketSession raw, WebSocketSession session, long id, JsonNode msg) {
         if ("host".equals(text(msg, "role"))) {
-            if (!service.isLiveAndKeyMatches(id, text(msg, "streamKey"))) {
-                LiveRooms.send(session, Map.of("type", "error", "message", "송출 키가 올바르지 않거나 이미 종료된 방송입니다."));
+            // 송출자 권한: WebSocket 연결 요청에 실려 온 로그인 세션의 사용자가 이 방송의 소유자인지 서버에서 확인
+            LoginUser me = loginUser(raw);
+            if (me == null || !service.canHost(id, me)) {
+                String reason = me == null ? "로그인이 필요합니다." : "이 방송의 소유자만 송출할 수 있습니다. (또는 이미 종료된 방송)";
+                LiveRooms.send(session, Map.of("type", "error", "message", reason));
                 LiveRooms.closeQuietly(raw, CloseStatus.POLICY_VIOLATION);
                 return;
             }
@@ -120,6 +126,11 @@ public class SignalingHandler extends TextWebSocketHandler {
         } else {
             rooms.detachViewer(id, (String) raw.getAttributes().get(ATTR_VIEWER_ID));
         }
+    }
+
+    private static LoginUser loginUser(WebSocketSession raw) {
+        if (raw.getPrincipal() instanceof Authentication auth && auth.getPrincipal() instanceof LoginUser u) return u;
+        return null;
     }
 
     private static WebSocketSession safe(WebSocketSession raw) {

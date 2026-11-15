@@ -12,6 +12,7 @@
     <div class="nav">
       <a class="btn btn-live" href="/go-live.html">● 방송 시작</a>
       <a class="btn btn-primary" href="/upload.html">＋ 다시보기 등록</a>
+      <span id="auth-slot"></span>
     </div>
   </header>
   <main>
@@ -48,12 +49,12 @@
           return `
           <a class="card ${on ? '' : 'ended'}" href="/live.html?id=${b.id}">
             <div class="live-thumb">
-              <div><div class="who">${esc(b.streamer || '익명 스트리머')}</div></div>
+              <div><div class="who">${esc(chi.name(b))}</div></div>
               ${on ? '<span class="badge live"><span class="dot"></span>LIVE</span>' : '<span class="badge ended">종료</span>'}
               <span class="badge count">${on ? chi.viewers(b.viewerCount) : chi.elapsed(b.startedAt, b.endedAt)}</span>
             </div>
             <div class="card-title">${esc(b.title)}</div>
-            <div class="meta">${esc(b.streamer || '익명 스트리머')}</div>
+            <div class="meta">${esc(chi.name(b))}</div>
             <div class="meta">${on ? `${ago(b.startedAt)} 시작 · ${chi.elapsed(b.startedAt)} 째 방송 중` : `${ago(b.endedAt)} 종료`}</div>
           </a>`;
         }).join('');
@@ -77,7 +78,7 @@
               ${b.durationSec ? `<span class="badge dur">${duration(b.durationSec)}</span>` : ''}
             </div>
             <div class="card-title">${esc(b.title)}</div>
-            <div class="meta">${esc(b.streamer || '익명 스트리머')}</div>
+            <div class="meta">${esc(chi.name(b))}</div>
             <div class="meta">${views(b.views)} · ${ago(b.createdAt)}</div>
           </a>`).join('');
       } catch (e) {

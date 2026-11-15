@@ -138,6 +138,18 @@ public class LiveRooms {
         }
     }
 
+    /** 방송 중인 방의 송출자·시청자 모두에게 보냅니다 (댓글, 제목 변경 등) */
+    public void sendToAll(long id, Map<String, ?> message) {
+        Room r = rooms.get(id);
+        if (r == null) return;
+        List<WebSocketSession> targets;
+        synchronized (r) {
+            targets = new java.util.ArrayList<>(r.viewers.values());
+            if (r.host != null) targets.add(r.host);
+        }
+        for (WebSocketSession s : targets) send(s, message);
+    }
+
     public int viewerCount(long id) {
         Room r = rooms.get(id);
         if (r == null) return 0;
