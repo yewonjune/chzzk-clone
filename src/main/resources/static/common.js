@@ -25,4 +25,13 @@ window.chi = {
     return new Date(iso).toLocaleDateString('ko-KR');
   },
   views: (n) => `조회수 ${Number(n || 0).toLocaleString('ko-KR')}회`,
+  viewers: (n) => `시청자 ${Number(n || 0).toLocaleString('ko-KR')}명`,
+  // 방송 시간: 시작~종료(또는 지금)
+  elapsed(startIso, endIso) {
+    const ms = (endIso ? new Date(endIso) : new Date()) - new Date(startIso);
+    return chi.duration(Math.max(1, ms / 1000)) || '0:00';
+  },
+  time: (iso) => new Date(iso).toLocaleString('ko-KR'),
+  // 같은 서버의 WebSocket 주소 (https 이면 wss)
+  wsUrl: (path) => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${path}`,
 };

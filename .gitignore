@@ -6,3 +6,5 @@ out/
 data/
 .env
 .claude/
+certs/
+*.p12

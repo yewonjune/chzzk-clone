@@ -3,32 +3,72 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>치치직 - 다시보기</title>
+  <title>치치직</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <header class="topbar">
     <a class="logo" href="/"><span class="logo-mark">▶</span>치치<span class="accent">직</span></a>
-    <a class="btn btn-primary" href="/upload.html">＋ 방송 등록</a>
+    <div class="nav">
+      <a class="btn btn-live" href="/go-live.html">● 방송 시작</a>
+      <a class="btn btn-primary" href="/upload.html">＋ 다시보기 등록</a>
+    </div>
   </header>
   <main>
-    <h1>다시보기</h1>
-    <div id="list" class="grid" aria-live="polite"></div>
-    <div id="empty" class="empty" hidden>
-      <p>아직 등록된 방송이 없습니다.</p>
-      <a class="btn btn-primary" href="/upload.html">첫 방송 등록하기</a>
-    </div>
+    <section>
+      <div class="section-head"><h2>라이브</h2><p class="meta" id="live-meta"></p></div>
+      <div id="live-list" class="grid" aria-live="polite"></div>
+      <p id="live-empty" class="empty-inline" hidden>지금 진행 중인 방송이 없습니다. 휴대폰에서 <a class="accent" href="/go-live.html">방송을 시작</a>해 보세요.</p>
+    </section>
+
+    <section>
+      <div class="section-head"><h2>다시보기</h2></div>
+      <div id="list" class="grid"></div>
+      <div id="empty" class="empty" hidden>
+        <p>아직 등록된 다시보기가 없습니다.</p>
+        <a class="btn btn-primary" href="/upload.html">첫 다시보기 등록하기</a>
+      </div>
+    </section>
     <p id="error" class="error"></p>
   </main>
   <script src="/common.js"></script>
   <script>
-    (async () => {
-      const { api, esc, duration, ago, views } = chi;
+    const { api, esc, duration, ago, views } = chi;
+    const $ = (id) => document.getElementById(id);
+
+    // 라이브: 방송 중이 먼저, 그다음 종료. 5초마다 새로고침
+    async function loadLive() {
       try {
         const items = await api('/api/broadcasts');
-        document.getElementById('empty').hidden = items.length > 0;
-        document.getElementById('list').innerHTML = items.map((b) => `
-          <a class="card" href="/watch.html?id=${b.id}">
+        const live = items.filter((b) => b.status === 'live').length;
+        $('live-meta').textContent = live ? `${live}개 방송 중` : '';
+        $('live-empty').hidden = live > 0;
+        $('live-list').innerHTML = items.map((b) => {
+          const on = b.status === 'live';
+          return `
+          <a class="card ${on ? '' : 'ended'}" href="/live.html?id=${b.id}">
+            <div class="live-thumb">
+              <div><div class="who">${esc(b.streamer || '익명 스트리머')}</div></div>
+              ${on ? '<span class="badge live"><span class="dot"></span>LIVE</span>' : '<span class="badge ended">종료</span>'}
+              <span class="badge count">${on ? chi.viewers(b.viewerCount) : chi.elapsed(b.startedAt, b.endedAt)}</span>
+            </div>
+            <div class="card-title">${esc(b.title)}</div>
+            <div class="meta">${esc(b.streamer || '익명 스트리머')}</div>
+            <div class="meta">${on ? `${ago(b.startedAt)} 시작 · ${chi.elapsed(b.startedAt)} 째 방송 중` : `${ago(b.endedAt)} 종료`}</div>
+          </a>`;
+        }).join('');
+        $('error').textContent = '';
+      } catch (e) {
+        $('error').textContent = e.message;
+      }
+    }
+
+    async function loadReplays() {
+      try {
+        const items = await api('/api/replays');
+        $('empty').hidden = items.length > 0;
+        $('list').innerHTML = items.map((b) => `
+          <a class="card" href="/replay.html?id=${b.id}">
             <div class="thumb">
               <div class="ph">▶</div>
               <video src="${esc(b.videoUrl)}#t=1" preload="metadata" muted playsinline
@@ -41,9 +81,13 @@
             <div class="meta">${views(b.views)} · ${ago(b.createdAt)}</div>
           </a>`).join('');
       } catch (e) {
-        document.getElementById('error').textContent = e.message;
+        $('error').textContent = e.message;
       }
-    })();
+    }
+
+    loadLive();
+    loadReplays();
+    setInterval(() => { if (document.visibilityState === 'visible') loadLive(); }, 5000);
   </script>
 </body>
 </html>

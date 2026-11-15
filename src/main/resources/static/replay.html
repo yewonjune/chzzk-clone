@@ -9,7 +9,7 @@
 <body>
   <header class="topbar">
     <a class="logo" href="/"><span class="logo-mark">▶</span>치치<span class="accent">직</span></a>
-    <a class="btn btn-primary" href="/upload.html">＋ 방송 등록</a>
+    <div class="nav"><a class="btn btn-live" href="/go-live.html">● 방송 시작</a><a class="btn btn-primary" href="/upload.html">＋ 다시보기 등록</a></div>
   </header>
   <main>
     <section id="watch" hidden>
@@ -33,8 +33,8 @@
       const $ = (id) => document.getElementById(id);
       const id = new URLSearchParams(location.search).get('id');
       try {
-        if (!id) throw new Error('방송을 찾을 수 없습니다.');
-        const b = await api(`/api/broadcasts/${encodeURIComponent(id)}`);
+        if (!id) throw new Error('다시보기를 찾을 수 없습니다.');
+        const b = await api(`/api/replays/${encodeURIComponent(id)}`);
         document.title = `${b.title} - 치치직`;
         $('title').textContent = b.title;
         $('streamer').textContent = b.streamer || '익명 스트리머';
@@ -49,7 +49,7 @@
         });
         $('watch').hidden = false;
         // 상세 화면 진입 시 조회수 1 증가 (실패해도 시청에는 영향 없음)
-        api(`/api/broadcasts/${b.id}/views`, { method: 'POST' })
+        api(`/api/replays/${b.id}/views`, { method: 'POST' })
           .then((r) => { $('views').textContent = views(r.views); }).catch(() => {});
       } catch (e) {
         $('error').textContent = e.message;

@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>치치직 - 방송</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="logo" href="/"><span class="logo-mark">▶</span>치치<span class="accent">직</span></a>
+    <div class="nav"><a class="btn btn-live" href="/go-live.html">● 방송 시작</a></div>
+  </header>
+  <main>
+    <section id="view" hidden>
+      <div class="stage">
+        <video id="player" autoplay muted playsinline></video>
+        <div class="overlay" id="overlay">스트리머와 연결하는 중…</div>
+        <div class="hud">
+          <span class="badge live" id="status-badge"><span class="dot"></span>LIVE</span>
+          <span class="badge" id="viewer-count" hidden></span>
+        </div>
+        <button class="btn btn-primary unmute" id="btn-unmute" hidden>🔊 소리 켜기</button>
+      </div>
+      <h1 class="watch-title" id="title"></h1>
+      <div class="info-row">
+        <span class="streamer" id="streamer"></span>
+        <span id="started"></span>
+        <span id="elapsed"></span>
+      </div>
+      <div class="summary" id="summary" hidden></div>
+    </section>
+    <p id="error" class="error"></p>
+    <a class="btn" href="/">← 목록으로</a>
+  </main>
+  <script src="/common.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const id = new URLSearchParams(location.search).get('id');
+    let b = null, pc = null, ws = null, pending = [], timer = null, done = false;
+
+    (async () => {
+      try {
+        if (!id) throw new Error('방송을 찾을 수 없습니다.');
+        b = await chi.api(`/api/broadcasts/${encodeURIComponent(id)}`);
+        document.title = `${b.title} - 치치직`;
+        $('title').textContent = b.title;
+        $('streamer').textContent = b.streamer || '익명 스트리머';
+        $('started').textContent = `${chi.time(b.startedAt)} 시작`;
+        $('view').hidden = false;
+        if (b.status === 'ended') return showEnded('종료된 방송입니다.');
+
+        const config = await chi.api('/api/live-config').catch(() => ({ iceServers: [] }));
+        timer = setInterval(() => { $('elapsed').textContent = `방송 ${chi.elapsed(b.startedAt)}`; }, 1000);
+        connect(config.iceServers);
+      } catch (e) {
+        $('error').textContent = e.message;
+      }
+    })();
+
+    function connect(iceServers) {
+      ws = new WebSocket(chi.wsUrl(`/ws/broadcasts/${b.id}`));
+      ws.onopen = () => ws.send(JSON.stringify({ type: 'join', role: 'viewer' }));
+      ws.onmessage = async (ev) => {
+        const m = JSON.parse(ev.data);
+        if (m.type === 'viewers') {
+          $('viewer-count').hidden = false;
+          $('viewer-count').textContent = chi.viewers(m.count);
+        } else if (m.type === 'full') {
+          overlay(`시청자가 가득 찼습니다. (최대 ${m.max}명) 잠시 후 다시 시도해 주세요.`);
+          stop();
+        } else if (m.type === 'ended') {
+          showEnded('방송이 종료되었습니다.');
+        } else if (m.type === 'signal') {
+          await onSignal(m.data, iceServers);
+        }
+      };
+      ws.onclose = () => { if (!done) overlay('서버와의 연결이 끊겼습니다. 새로고침해 주세요.'); };
+    }
+
+    async function onSignal(data, iceServers) {
+      if (data.sdp) {
+        // 송출자가 보낸 offer → answer (송출자가 다시 연결하면 새 offer가 올 수 있음)
+        pc?.close();
+        pending = [];
+        pc = new RTCPeerConnection({ iceServers });
+        pc.ontrack = (e) => {
+          const v = $('player');
+          if (v.srcObject !== e.streams[0]) v.srcObject = e.streams[0];
+          $('overlay').hidden = true;
+          v.play().catch(() => {});
+          $('btn-unmute').hidden = !v.muted;
+        };
+        pc.onicecandidate = (e) => { if (e.candidate) send({ type: 'signal', data: { candidate: e.candidate } }); };
+        pc.onconnectionstatechange = () => {
+          if (pc.connectionState === 'failed') {
+            overlay('영상 연결에 실패했습니다. 휴대폰과 같은 Wi-Fi에 연결했는지 확인해 주세요. (다른 네트워크라면 TURN 설정이 필요할 수 있습니다)');
+          }
+        };
+        await pc.setRemoteDescription(data.sdp);
+        for (const c of pending.splice(0)) await pc.addIceCandidate(c).catch(() => {});
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        send({ type: 'signal', data: { sdp: pc.localDescription } });
+      } else if (data.candidate) {
+        if (pc?.remoteDescription) await pc.addIceCandidate(data.candidate).catch(() => {});
+        else pending.push(data.candidate);
+      }
+    }
+
+    // 브라우저 자동재생 정책: 소리 있는 영상은 사용자 동작 없이 재생할 수 없어 음소거로 시작합니다.
+    $('btn-unmute').addEventListener('click', () => {
+      const v = $('player');
+      v.muted = false;
+      v.play().catch(() => {});
+      $('btn-unmute').hidden = true;
+    });
+
+    async function showEnded(message) {
+      stop();
+      overlay(message);
+      const badge = $('status-badge');
+      badge.className = 'badge ended';
+      badge.textContent = '종료';
+      $('viewer-count').hidden = true;
+      $('btn-unmute').hidden = true;
+      $('player').srcObject = null;
+      const latest = await chi.api(`/api/broadcasts/${b.id}`).catch(() => b);
+      $('elapsed').textContent = '';
+      $('summary').hidden = false;
+      $('summary').innerHTML = `<div>방송 시간 <b>${chi.elapsed(latest.startedAt, latest.endedAt || new Date().toISOString())}</b></div>
+        <div>시작 ${chi.time(latest.startedAt)}${latest.endedAt ? ` · 종료 ${chi.time(latest.endedAt)}` : ''}</div>
+        <div>방송은 녹화되지 않아 다시 볼 수 없습니다.</div>`;
+    }
+
+    function overlay(text) {
+      $('overlay').hidden = false;
+      $('overlay').textContent = text;
+    }
+
+    function stop() {
+      done = true;
+      clearInterval(timer);
+      pc?.close(); pc = null;
+      ws?.close();
+    }
+
+    function send(msg) { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
+  </script>
+</body>
+</html>

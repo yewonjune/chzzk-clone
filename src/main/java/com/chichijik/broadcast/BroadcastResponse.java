@@ -1,31 +1,26 @@
 package com.chichijik.broadcast;
 
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 
-/** API 응답. videoUrl 은 업로드 영상이면 /media/..., 연결한 영상이면 원래 주소입니다. */
+/** 방송 API 응답. 송출 키(해시 포함)는 절대 담지 않습니다. */
 public record BroadcastResponse(
         Long id,
         String title,
         String streamer,
-        String description,
-        String sourceType,
-        String videoUrl,
-        String mimeType,
-        Long sizeBytes,
-        Double durationSec,
-        long views,
-        Instant createdAt
+        String status,
+        Instant startedAt,
+        Instant endedAt,
+        int viewerCount
 ) {
-    static BroadcastResponse from(Broadcast b) {
-        String videoUrl = b.getSourceType() == Broadcast.SourceType.UPLOAD
-                ? "/media/" + URLEncoder.encode(b.getVideoPath(), StandardCharsets.UTF_8)
-                : b.getVideoPath();
+    static BroadcastResponse from(Broadcast b, int viewerCount) {
         return new BroadcastResponse(
-                b.getId(), b.getTitle(), b.getStreamer(), b.getDescription(),
-                b.getSourceType().name().toLowerCase(), videoUrl,
-                b.getMimeType(), b.getSizeBytes(), b.getDurationSec(),
-                b.getViews(), b.getCreatedAt());
+                b.getId(), b.getTitle(), b.getStreamer(),
+                b.getStatus().name().toLowerCase(),
+                b.getStartedAt(), b.getEndedAt(),
+                b.isLive() ? viewerCount : 0);
+    }
+
+    /** 방송 시작 응답: 송출 키는 이 응답에서 단 한 번만 내려갑니다. */
+    public record Started(BroadcastResponse broadcast, String streamKey) {
     }
 }

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>치치직 - 방송 등록</title>
+  <title>치치직 - 다시보기 등록</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,7 @@
     <a class="btn" href="/">목록</a>
   </header>
   <main>
-    <h1>녹화 방송 등록</h1>
+    <h1>다시보기 등록</h1>
     <form id="form" class="form" novalidate>
       <div class="field">
         <label for="title">제목 *</label>
@@ -43,7 +43,7 @@
       </div>
       <div class="field">
         <label for="description">설명</label>
-        <textarea id="description" name="description" maxlength="2000" placeholder="방송 내용을 소개해 주세요."></textarea>
+        <textarea id="description" name="description" maxlength="2000" placeholder="영상 내용을 소개해 주세요."></textarea>
       </div>
       <div class="progress" id="progress" hidden><div></div></div>
       <p class="error" id="error"></p>
@@ -122,11 +122,11 @@
       xhr.onload = () => {
         let body = {};
         try { body = JSON.parse(xhr.responseText); } catch {}
-        if (xhr.status === 201) return location.assign(`/watch.html?id=${body.id}`);
+        if (xhr.status === 201) return location.assign(`/replay.html?id=${body.id}`);
         done(); showError(body.error || `등록 실패 (${xhr.status})`);
       };
       xhr.onerror = () => { done(); showError('네트워크 오류로 등록하지 못했습니다.'); };
-      xhr.open('POST', '/api/broadcasts');
+      xhr.open('POST', '/api/replays');
       xhr.send(fd);
 
       function done() { $('submit').disabled = false; bar.hidden = true; }

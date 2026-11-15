@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>치치직 - 방송 시작</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="logo" href="/"><span class="logo-mark">▶</span>치치<span class="accent">직</span></a>
+    <div class="nav"><a class="btn" href="/" id="home-link">목록</a></div>
+  </header>
+  <main>
+    <h1 id="heading">방송 시작</h1>
+
+    <p class="notice warn" id="insecure" hidden>
+      이 주소에서는 카메라·마이크를 쓸 수 없습니다. 휴대폰 브라우저는 <b>HTTPS</b> 주소(또는 localhost)에서만 카메라를 허용합니다.
+      README의 "휴대폰으로 송출하기"에 따라 https:// 주소로 접속해 주세요.
+    </p>
+
+    <div class="stage portrait" id="stage">
+      <video id="preview" autoplay muted playsinline class="mirror"></video>
+      <div class="overlay" id="overlay">카메라·마이크를 켜면 여기에 미리보기가 나옵니다.</div>
+      <div class="hud" id="hud" hidden>
+        <span class="badge live"><span class="dot"></span>LIVE</span>
+        <span class="badge" id="elapsed">0:00</span>
+        <span class="badge" id="viewer-count">시청자 0명</span>
+      </div>
+    </div>
+
+    <!-- 시작 전 -->
+    <form id="setup" class="form" style="margin-top:16px" novalidate>
+      <div class="field">
+        <label for="title">방송 제목 *</label>
+        <input id="title" type="text" maxlength="100" required placeholder="예) 퇴근길 수다 방송">
+      </div>
+      <div class="field">
+        <label for="streamer">스트리머</label>
+        <input id="streamer" type="text" maxlength="40" placeholder="비워두면 '익명 스트리머'">
+      </div>
+      <p class="error" id="error"></p>
+      <div class="controls">
+        <button class="btn" type="button" id="btn-camera">카메라·마이크 켜기</button>
+        <button class="btn btn-live" type="submit" id="btn-start" disabled>방송 시작</button>
+      </div>
+    </form>
+
+    <!-- 방송 중 -->
+    <div id="live-controls" hidden>
+      <div class="controls">
+        <button class="btn" type="button" id="btn-flip">카메라 전환</button>
+        <button class="btn" type="button" id="btn-mute">마이크 끄기</button>
+        <button class="btn btn-danger" type="button" id="btn-end">방송 종료</button>
+      </div>
+      <p class="meta" id="live-note" style="margin-top:10px"></p>
+    </div>
+
+    <!-- 종료 후 -->
+    <div id="ended" hidden>
+      <p class="notice" id="ended-msg">방송이 종료되었습니다.</p>
+      <div class="summary" id="summary"></div>
+      <div class="controls"><a class="btn btn-primary" href="/">목록으로</a><a class="btn" href="/go-live.html">새 방송 시작</a></div>
+    </div>
+  </main>
+  <script src="/common.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const s = {
+      stream: null, facing: 'user', key: null, broadcast: null, ws: null,
+      peers: new Map(), iceServers: [], timer: null, wakeLock: null, live: false, ending: false,
+    };
+
+    // 카메라·마이크는 보안 컨텍스트(HTTPS 또는 localhost)에서만 사용 가능
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+      $('insecure').hidden = false;
+      $('btn-camera').disabled = true;
+    }
+    chi.api('/api/live-config').then((c) => { s.iceServers = c.iceServers; }).catch(() => {});
+
+    const videoConstraints = (facing) => ({
+      facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 },
+    });
+
+    $('btn-camera').addEventListener('click', async () => {
+      $('error').textContent = '';
+      try {
+        s.stream = await navigator.mediaDevices.getUserMedia({
+          video: videoConstraints(s.facing),
+          audio: { echoCancellation: true, noiseSuppression: true },
+        });
+        $('preview').srcObject = s.stream;
+        $('overlay').hidden = true;
+        $('btn-camera').hidden = true;
+        $('btn-start').disabled = false;
+      } catch (e) {
+        $('error').textContent = e.name === 'NotAllowedError'
+          ? '카메라·마이크 권한이 거부되었습니다. 브라우저 주소창의 권한 설정에서 허용한 뒤 다시 시도해 주세요.'
+          : `카메라·마이크를 켤 수 없습니다. (${e.name})`;
+      }
+    });
+
+    $('setup').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      $('error').textContent = '';
+      const title = $('title').value.trim();
+      if (!title) return ($('error').textContent = '방송 제목을 입력해 주세요.');
+      if (!s.stream) return ($('error').textContent = '먼저 카메라·마이크를 켜 주세요.');
+      $('btn-start').disabled = true;
+      try {
+        const res = await chi.api('/api/broadcasts', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title, streamer: $('streamer').value.trim() }),
+        });
+        s.broadcast = res.broadcast;
+        s.key = res.streamKey; // 메모리에만 보관 (새로고침하면 방송이 종료됨)
+        connect();
+      } catch (err) {
+        $('error').textContent = err.message;
+        $('btn-start').disabled = false;
+      }
+    });
+
+    function connect() {
+      const ws = new WebSocket(chi.wsUrl(`/ws/broadcasts/${s.broadcast.id}`));
+      s.ws = ws;
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ type: 'join', role: 'host', streamKey: s.key }));
+        goLive();
+      };
+      ws.onmessage = (ev) => onMessage(JSON.parse(ev.data));
+      ws.onclose = () => { if (s.live) finish('서버와의 연결이 끊겨 방송이 종료되었습니다.'); };
+    }
+
+    function goLive() {
+      s.live = true;
+      document.title = `🔴 ${s.broadcast.title} - 치치직`;
+      $('heading').textContent = s.broadcast.title;
+      $('setup').hidden = true;
+      $('live-controls').hidden = false;
+      $('hud').hidden = false;
+      $('live-note').innerHTML = `시청 주소: <b>${chi.esc(location.origin)}/live.html?id=${s.broadcast.id}</b> · 이 화면을 닫거나 새로고침하면 방송이 종료됩니다.`;
+      s.timer = setInterval(() => { $('elapsed').textContent = chi.elapsed(s.broadcast.startedAt); }, 1000);
+      keepAwake();
+    }
+
+    async function onMessage(m) {
+      if (m.type === 'viewer-joined') return offerTo(m.viewerId);
+      if (m.type === 'viewer-left') return dropPeer(m.viewerId);
+      if (m.type === 'viewers') return ($('viewer-count').textContent = chi.viewers(m.count));
+      if (m.type === 'ended') return finish(s.ending ? '방송을 종료했습니다.' : '방송이 종료되었습니다.');
+      if (m.type === 'error') return finish(m.message);
+      if (m.type === 'signal') {
+        const p = s.peers.get(m.from);
+        if (!p) return;
+        if (m.data.sdp) {
+          await p.pc.setRemoteDescription(m.data.sdp);
+          for (const c of p.pending.splice(0)) await p.pc.addIceCandidate(c).catch(() => {});
+        } else if (m.data.candidate) {
+          if (p.pc.remoteDescription) await p.pc.addIceCandidate(m.data.candidate).catch(() => {});
+          else p.pending.push(m.data.candidate);
+        }
+      }
+    }
+
+    // 시청자 한 명당 RTCPeerConnection 하나 (P2P)
+    async function offerTo(viewerId) {
+      dropPeer(viewerId);
+      const pc = new RTCPeerConnection({ iceServers: s.iceServers });
+      s.peers.set(viewerId, { pc, pending: [] });
+      s.stream.getTracks().forEach((t) => pc.addTrack(t, s.stream));
+      pc.onicecandidate = (e) => { if (e.candidate) send({ type: 'signal', to: viewerId, data: { candidate: e.candidate } }); };
+      pc.onconnectionstatechange = () => { if (pc.connectionState === 'failed') dropPeer(viewerId); };
+      await capBitrate(pc);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      send({ type: 'signal', to: viewerId, data: { sdp: pc.localDescription } });
+    }
+
+    // 시청자가 늘수록 휴대폰 업로드가 늘어나므로 영상 비트레이트 상한을 둡니다.
+    async function capBitrate(pc) {
+      for (const sender of pc.getSenders()) {
+        if (sender.track?.kind !== 'video') continue;
+        const params = sender.getParameters();
+        params.encodings = params.encodings?.length ? params.encodings : [{}];
+        params.encodings[0].maxBitrate = 1_500_000;
+        await sender.setParameters(params).catch(() => {});
+      }
+    }
+
+    function dropPeer(viewerId) {
+      const p = s.peers.get(viewerId);
+      if (p) { p.pc.close(); s.peers.delete(viewerId); }
+    }
+
+    function send(msg) { if (s.ws?.readyState === WebSocket.OPEN) s.ws.send(JSON.stringify(msg)); }
+
+    $('btn-flip').addEventListener('click', async () => {
+      const facing = s.facing === 'user' ? 'environment' : 'user';
+      try {
+        const cam = await navigator.mediaDevices.getUserMedia({ video: videoConstraints(facing) });
+        const track = cam.getVideoTracks()[0];
+        const old = s.stream.getVideoTracks()[0];
+        for (const { pc } of s.peers.values()) {
+          const sender = pc.getSenders().find((x) => x.track?.kind === 'video');
+          if (sender) await sender.replaceTrack(track);
+        }
+        s.stream.removeTrack(old); old.stop(); s.stream.addTrack(track);
+        s.facing = facing;
+        $('preview').classList.toggle('mirror', facing === 'user');
+      } catch (e) {
+        alert('카메라를 전환할 수 없습니다. 후면 카메라가 없는 기기일 수 있습니다.');
+      }
+    });
+
+    $('btn-mute').addEventListener('click', () => {
+      const t = s.stream.getAudioTracks()[0];
+      if (!t) return;
+      t.enabled = !t.enabled;
+      $('btn-mute').textContent = t.enabled ? '마이크 끄기' : '마이크 켜기';
+    });
+
+    $('btn-end').addEventListener('click', async () => {
+      if (!confirm('방송을 종료할까요? 종료한 방송은 다시 시작할 수 없습니다.')) return;
+      s.ending = true;
+      try {
+        await chi.api(`/api/broadcasts/${s.broadcast.id}/end`, { method: 'POST', headers: { 'X-Stream-Key': s.key } });
+      } catch (e) { /* 연결을 닫으면 서버가 종료 처리합니다 */ }
+      finish('방송을 종료했습니다.');
+    });
+
+    async function finish(message) {
+      if (s.finished) return; // 종료 API 응답과 ended 메시지 중 먼저 온 쪽만 처리
+      s.finished = true;
+      s.live = false;
+      clearInterval(s.timer);
+      for (const id of [...s.peers.keys()]) dropPeer(id);
+      s.ws?.close();
+      s.stream?.getTracks().forEach((t) => t.stop());
+      s.wakeLock?.release().catch(() => {});
+      document.title = '치치직 - 방송 종료';
+      $('live-controls').hidden = true;
+      $('hud').hidden = true;
+      $('overlay').hidden = false;
+      $('overlay').textContent = '방송 종료';
+      $('ended').hidden = false;
+      $('ended-msg').textContent = message;
+      if (s.broadcast) {
+        const b = await chi.api(`/api/broadcasts/${s.broadcast.id}`).catch(() => null);
+        if (b) $('summary').innerHTML = `<div>제목 <b>${chi.esc(b.title)}</b></div>
+          <div>방송 시간 <b>${chi.elapsed(b.startedAt, b.endedAt)}</b></div>
+          <div>시작 ${chi.time(b.startedAt)}${b.endedAt ? ` · 종료 ${chi.time(b.endedAt)}` : ''}</div>`;
+      }
+    }
+
+    // 방송 중 화면이 꺼지면 브라우저가 카메라를 멈추므로 화면 켜짐 유지를 요청
+    async function keepAwake() {
+      try { s.wakeLock = await navigator.wakeLock?.request('screen'); } catch { /* 미지원 브라우저 */ }
+    }
+    document.addEventListener('visibilitychange', () => {
+      if (s.live && document.visibilityState === 'visible') keepAwake();
+    });
+    window.addEventListener('beforeunload', (e) => { if (s.live) e.preventDefault(); });
+  </script>
+</body>
+</html>

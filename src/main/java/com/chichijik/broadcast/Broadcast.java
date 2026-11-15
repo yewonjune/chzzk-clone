@@ -9,15 +9,17 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
-import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
 
-/** 녹화 방송. 영상 위치는 sourceType 에 따라 업로드 파일명 또는 외부 영상 주소입니다. */
+/**
+ * 방송: 스트리머가 휴대폰으로 시작해서 종료할 때까지 이어지는 실시간 송출 한 번.
+ * 영상은 저장하지 않고 기록(제목·시각·상태)만 남깁니다.
+ */
 @Entity
-@Table(name = "broadcasts")
+@Table(name = "live_broadcasts")
 public class Broadcast {
 
-    public enum SourceType { UPLOAD, URL }
+    public enum Status { LIVE, ENDED }
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -29,60 +31,47 @@ public class Broadcast {
     @Column(nullable = false, length = 40)
     private String streamer;
 
-    @Column(nullable = false, length = 2000)
-    private String description;
-
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 10)
-    private SourceType sourceType;
+    private Status status;
 
-    /** UPLOAD: 업로드 폴더 내 파일명, URL: 외부 영상 주소 */
-    @Column(nullable = false, length = 2048)
-    private String videoPath;
-
-    private String mimeType;
-    private Long sizeBytes;
-    private Double durationSec;
-
-    @Column(nullable = false)
-    private long views;
+    /** 송출 키의 SHA-256 해시(hex). 원래 키는 저장하지 않습니다. */
+    @Column(nullable = false, length = 64)
+    private String streamKeyHash;
 
     @Column(nullable = false, updatable = false)
-    private Instant createdAt;
+    private Instant startedAt;
+
+    private Instant endedAt;
 
     protected Broadcast() {
     }
 
-    public Broadcast(String title, String streamer, String description, SourceType sourceType,
-                     String videoPath, String mimeType, Long sizeBytes, Double durationSec) {
+    public Broadcast(String title, String streamer, String streamKeyHash, Instant startedAt) {
         this.title = title;
         this.streamer = streamer;
-        this.description = description;
-        this.sourceType = sourceType;
-        this.videoPath = videoPath;
-        this.mimeType = mimeType;
-        this.sizeBytes = sizeBytes;
-        this.durationSec = durationSec;
+        this.streamKeyHash = streamKeyHash;
+        this.startedAt = startedAt;
+        this.status = Status.LIVE;
     }
 
-    @PrePersist
-    void onCreate() {
-        if (createdAt == null) createdAt = Instant.now();
+    /** 종료는 한 번만 일어나며 되돌릴 수 없습니다. 이미 종료됐으면 false. */
+    public boolean end(Instant at) {
+        if (status == Status.ENDED) return false;
+        status = Status.ENDED;
+        endedAt = at;
+        return true;
     }
 
-    public void increaseViews() {
-        views++;
+    public boolean isLive() {
+        return status == Status.LIVE;
     }
 
     public Long getId() { return id; }
     public String getTitle() { return title; }
     public String getStreamer() { return streamer; }
-    public String getDescription() { return description; }
-    public SourceType getSourceType() { return sourceType; }
-    public String getVideoPath() { return videoPath; }
-    public String getMimeType() { return mimeType; }
-    public Long getSizeBytes() { return sizeBytes; }
-    public Double getDurationSec() { return durationSec; }
-    public long getViews() { return views; }
-    public Instant getCreatedAt() { return createdAt; }
+    public Status getStatus() { return status; }
+    public String getStreamKeyHash() { return streamKeyHash; }
+    public Instant getStartedAt() { return startedAt; }
+    public Instant getEndedAt() { return endedAt; }
 }

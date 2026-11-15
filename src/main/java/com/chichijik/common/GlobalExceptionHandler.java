@@ -7,6 +7,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -45,6 +47,16 @@ public class GlobalExceptionHandler {
     @ExceptionHandler({NoResourceFoundException.class, MethodArgumentTypeMismatchException.class})
     ResponseEntity<Map<String, String>> handleNotFound() {
         return error(HttpStatus.NOT_FOUND, "요청한 대상을 찾을 수 없습니다.");
+    }
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    ResponseEntity<Map<String, String>> handleBadBody() {
+        return error(HttpStatus.BAD_REQUEST, "요청 본문을 읽을 수 없습니다.");
+    }
+
+    @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
+    ResponseEntity<Map<String, String>> handleMediaType() {
+        return error(HttpStatus.UNSUPPORTED_MEDIA_TYPE, "지원하지 않는 요청 형식입니다.");
     }
 
     @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
