@@ -18,6 +18,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import org.springframework.boot.builder.SpringApplicationBuilder;
@@ -212,6 +213,27 @@ final class ApiClient {
                 if (m != null && type.equals(m.get("type").asString())) return m;
             }
             throw new AssertionError("메시지를 받지 못함: " + type);
+        }
+
+        /** type 이 같고 조건에 맞는 메시지가 올 때까지 기다림 (중간에 온 다른 값은 건너뜀) */
+        JsonNode nextWhere(String type, Predicate<JsonNode> condition) throws InterruptedException {
+            long deadline = System.nanoTime() + WAIT.toNanos();
+            while (System.nanoTime() < deadline) {
+                JsonNode m = inbox.poll(50, TimeUnit.MILLISECONDS);
+                if (m != null && type.equals(m.get("type").asString()) && condition.test(m)) return m;
+            }
+            throw new AssertionError("조건에 맞는 메시지를 받지 못함: " + type);
+        }
+
+        /** 지금부터 잠시 기다리는 동안 type 메시지가 몇 개 더 오는지 */
+        int countWithin(String type, Duration wait) throws InterruptedException {
+            int n = 0;
+            long deadline = System.nanoTime() + wait.toNanos();
+            while (System.nanoTime() < deadline) {
+                JsonNode m = inbox.poll(50, TimeUnit.MILLISECONDS);
+                if (m != null && type.equals(m.get("type").asString())) n++;
+            }
+            return n;
         }
 
         void close() {
