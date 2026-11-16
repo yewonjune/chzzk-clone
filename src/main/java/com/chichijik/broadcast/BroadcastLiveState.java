@@ -20,7 +20,7 @@ import org.springframework.web.socket.WebSocketSession;
  *   서버 → 송출자 : viewer-joined{viewerId}, viewer-left{viewerId}, signal{from, data}, viewers{count}, ended, error{message}
  *   송출자 → 서버 : join{role:host}, signal{to, data}
  *   서버 → 시청자 : joined{viewerId, resumed}, signal{data}, viewers{count}, ended, full{max}
- *   시청자 → 서버 : join{role:viewer, viewerId?}, signal{data}
+ *   시청자 → 서버 : join{role:viewer, viewerId?, startOver?}, signal{data}
  *   서버 → 모두   : comment, donation, title (방송 중 메시지)
  *   서버가 내려갈 때는 열린 연결을 4001("다른 서버로 재연결")로 닫습니다.
  */
@@ -34,8 +34,12 @@ public interface BroadcastLiveState {
      */
     void attachHost(long broadcastId, WebSocketSession host);
 
-    /** 새 시청자 연결. 시청자 수가 상한에 이르렀으면 FULL 이고 연결을 추가하지 않습니다. */
-    JoinResult attachViewer(long broadcastId, String viewerId, WebSocketSession viewer, int maxViewers);
+    /**
+     * 새 시청자 연결. 시청자 수가 상한에 이르렀으면 FULL 이고 연결을 추가하지 않습니다.
+     * startingOver 가 있으면 같은 시청자 화면이 영상이 끊겨 처음부터 다시 입장하는 것이므로, 그 viewerId 의 이전 자리를
+     * 먼저 비웁니다(송출자에게 viewer-left, 시청자 수·상한에서 바로 빠짐). 이 방송에 그 자리가 없으면 아무것도 비우지 않습니다.
+     */
+    JoinResult attachViewer(long broadcastId, String viewerId, WebSocketSession viewer, int maxViewers, String startingOver);
 
     /**
      * 같은 시청자로 다시 연결. viewerId 가 아직 집합에 있으면 연결만 바꾸고 true(시청자 수 그대로, 송출자에게 알리지 않음),

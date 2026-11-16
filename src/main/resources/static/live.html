@@ -93,6 +93,10 @@
         onOpen: (reconnected) => {
           if (reconnected && viewerId && p2pAlive()) {
             send({ type: 'join', role: 'viewer', viewerId }); // 같은 시청자로 이어 붙기: 영상은 끊기지 않음
+          } else if (reconnected && viewerId) {
+            // 영상도 끊겼으면 처음부터 다시 입장: 이전 자리는 서버가 바로 비움(시청자 수·상한에 남지 않음)
+            pc?.close(); pc = null; pending = [];
+            send({ type: 'join', role: 'viewer', viewerId, startOver: true });
           } else {
             if (reconnected) { pc?.close(); pc = null; pending = []; }
             send({ type: 'join', role: 'viewer' });

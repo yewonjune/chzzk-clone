@@ -86,6 +86,27 @@ class ClusterBroadcastTest {
     }
 
     @Test
+    void A에서_끊긴_시청자가_B로_처음부터_다시_입장하면_이전_자리가_바로_비어_상한이_찬_방송에도_들어간다() throws Exception {
+        Live live = liveOnA();
+        Socket dropping = viewer(cluster.a, live.id());
+        String oldId = dropping.next("joined").get("viewerId").asString();
+        viewer(cluster.b, live.id()).next("joined");
+        viewer(cluster.b, live.id()).next("joined");
+        live.host().nextWhere("viewers", m -> m.get("count").asInt() == MAX_VIEWERS);
+
+        dropping.drop();
+        Socket again = ApiClient.anonymous(cluster.b).socket("/ws/broadcasts/" + live.id());
+        again.send("{\"type\":\"join\",\"role\":\"viewer\",\"viewerId\":\"" + oldId + "\",\"startOver\":true}");
+        var joined = again.next("joined");
+        assertThat(joined.get("resumed").asBoolean()).isFalse();
+        assertThat(live.host().nextWhere("viewer-left", m -> m.get("viewerId").asString().equals(oldId))).isNotNull();
+        assertThat(live.host().nextWhere("viewer-joined",
+                m -> m.get("viewerId").asString().equals(joined.get("viewerId").asString()))).isNotNull();
+        assertThat(json(ApiClient.anonymous(cluster.a).get("/api/broadcasts/" + live.id())).get("viewerCount").asInt())
+                .isEqualTo(MAX_VIEWERS);
+    }
+
+    @Test
     void 시청자_수는_두_서버에_붙은_시청자의_합계로_모든_연결에_전달된다() throws Exception {
         Live live = liveOnA();
         Socket onA = viewer(cluster.a, live.id());

@@ -242,6 +242,39 @@ class BroadcastFlowTest {
     }
 
     @Test
+    void 영상이_끊겨_처음부터_다시_입장하는_시청자는_이전_자리를_바로_비우고_새_자리를_받는다() throws Exception {
+        try (var app = ApiClient.startServer(dataDir, "--app.live.max-viewers=1", GRACE, SWEEP)) {
+            String base = ApiClient.baseUrl(app);
+            ApiClient owner = ApiClient.signUp(base, "streamer6", "다시입장");
+            ApiClient guest = ApiClient.anonymous(base);
+            long id = json(owner.postJson("/api/broadcasts", "{\"title\":\"다시 입장\"}")).get("id").asLong();
+            Socket host = owner.socket("/ws/broadcasts/" + id);
+            host.send("{\"type\":\"join\",\"role\":\"host\"}");
+
+            Socket viewer = guest.socket("/ws/broadcasts/" + id);
+            viewer.send("{\"type\":\"join\",\"role\":\"viewer\"}");
+            String oldId = viewer.next("joined").get("viewerId").asString();
+            host.nextWhere("viewers", m -> m.get("count").asInt() == 1);
+
+            // 비정상으로 끊기고 영상도 끊김 → 이전 viewerId 와 "처음부터" 표시로 다시 입장 (상한 1명이어도 가득 차지 않음)
+            viewer.drop();
+            Socket again = guest.socket("/ws/broadcasts/" + id);
+            again.send("{\"type\":\"join\",\"role\":\"viewer\",\"viewerId\":\"" + oldId + "\",\"startOver\":true}");
+            JsonNode joined = again.next("joined");
+            assertThat(joined.get("resumed").asBoolean()).isFalse();
+            String newId = joined.get("viewerId").asString();
+            assertThat(newId).isNotEqualTo(oldId);
+            assertThat(host.next("viewer-left").get("viewerId").asString()).isEqualTo(oldId);
+            assertThat(host.next("viewer-joined").get("viewerId").asString()).isEqualTo(newId);
+            assertThat(json(guest.get("/api/broadcasts/" + id)).get("viewerCount").asInt()).isEqualTo(1);
+
+            // 유예가 지나도 이전 자리 때문에 다시 퇴장 알림이 오거나 시청자 수가 바뀌지 않음
+            assertThat(host.countWithin("viewer-left", java.time.Duration.ofMillis(GRACE_MS + 500))).isZero();
+            assertThat(json(guest.get("/api/broadcasts/" + id)).get("viewerCount").asInt()).isEqualTo(1);
+        }
+    }
+
+    @Test
     void 같은_방송을_동시에_여러번_종료해도_종료는_한번만_일어나고_종료알림도_한번() throws Exception {
         try (var app = ApiClient.startServer(dataDir)) {
             String base = ApiClient.baseUrl(app);

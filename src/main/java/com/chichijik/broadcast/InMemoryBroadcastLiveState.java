@@ -66,17 +66,21 @@ public class InMemoryBroadcastLiveState implements BroadcastLiveState {
     }
 
     @Override
-    public JoinResult attachViewer(long id, String viewerId, WebSocketSession viewer, int maxViewers) {
+    public JoinResult attachViewer(long id, String viewerId, WebSocketSession viewer, int maxViewers, String startingOver) {
         Room r = room(id);
         WebSocketSession host;
+        boolean released;
+        boolean full;
         synchronized (r) {
-            if (r.viewers.size() >= maxViewers) return JoinResult.FULL;
-            r.viewers.put(viewerId, new Viewer(viewer));
+            released = startingOver != null && r.viewers.remove(startingOver) != null;
+            full = r.viewers.size() >= maxViewers;
+            if (!full) r.viewers.put(viewerId, new Viewer(viewer));
             host = r.host;
         }
-        if (host != null) WebSockets.send(host, Map.of("type", "viewer-joined", "viewerId", viewerId));
-        broadcastViewerCount(id);
-        return JoinResult.OK;
+        if (host != null && released) WebSockets.send(host, Map.of("type", "viewer-left", "viewerId", startingOver));
+        if (host != null && !full) WebSockets.send(host, Map.of("type", "viewer-joined", "viewerId", viewerId));
+        if (released || !full) broadcastViewerCount(id);
+        return full ? JoinResult.FULL : JoinResult.OK;
     }
 
     @Override

@@ -70,8 +70,19 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
     private static final JsonMapper JSON = JsonMapper.builder().build();
     static final String PREFIX = "chichijik:live:";
 
-    /** KEYS[1]=viewers, ARGV: 상한, viewerId, 인스턴스 id, 채널, viewer-joined 봉투 → 1 이면 입장, 0 이면 FULL */
+    /**
+     * KEYS[1]=viewers, KEYS[2]=viewers-disconnected,
+     * ARGV: 상한, viewerId, 인스턴스 id, 채널, viewer-joined 봉투, 처음부터 다시 입장하는 시청자의 이전 viewerId(없으면 ""),
+     *       그 viewer-left 봉투 → 1 이면 입장, 0 이면 FULL. 이전 자리는 상한 검사 전에 비움
+     */
     private static final RedisScript<Long> JOIN = RedisScript.of("""
+            if ARGV[6] ~= '' and redis.call('HDEL', KEYS[1], ARGV[6]) == 1 then
+              redis.call('HDEL', KEYS[2], ARGV[6])
+              redis.call('PUBLISH', ARGV[4], ARGV[7])
+              if redis.call('HLEN', KEYS[1]) >= tonumber(ARGV[1]) then
+                redis.call('PUBLISH', ARGV[4], '{"k":"all","m":{"type":"viewers","count":' .. redis.call('HLEN', KEYS[1]) .. '}}')
+              end
+            end
             if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 0 then
               if redis.call('HLEN', KEYS[1]) >= tonumber(ARGV[1]) then return 0 end
             end
@@ -268,13 +279,16 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
     }
 
     @Override
-    public JoinResult attachViewer(long id, String viewerId, WebSocketSession viewer, int maxViewers) {
+    public JoinResult attachViewer(long id, String viewerId, WebSocketSession viewer, int maxViewers, String startingOver) {
         Local l = local(id);
         synchronized (l) {
             l.viewers.put(viewerId, viewer); // 먼저 등록해야 자기 입장으로 바뀐 시청자 수를 받음
         }
-        Long ok = redis.execute(JOIN, List.of(viewersKey(id)), String.valueOf(maxViewers), viewerId, instanceId,
-                channel(id), envelope(Map.of("k", "host", "m", Map.of("type", "viewer-joined", "viewerId", viewerId))));
+        String previous = startingOver == null ? "" : startingOver;
+        Long ok = redis.execute(JOIN, List.of(viewersKey(id), disconnectedViewersKey(id)), String.valueOf(maxViewers),
+                viewerId, instanceId, channel(id),
+                envelope(Map.of("k", "host", "m", Map.of("type", "viewer-joined", "viewerId", viewerId))), previous,
+                envelope(Map.of("k", "host", "m", Map.of("type", "viewer-left", "viewerId", previous))));
         if (ok != null && ok == 1) return JoinResult.OK;
         synchronized (l) {
             l.viewers.remove(viewerId);

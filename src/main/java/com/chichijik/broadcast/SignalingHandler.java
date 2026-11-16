@@ -28,6 +28,8 @@ import tools.jackson.databind.json.JsonMapper;
  *   재연결한 시청자: {"type":"join","role":"viewer","viewerId":"이전 id"}
  *       → 아직 시청자 집합에 있으면 joined{viewerId, resumed:true} (같은 시청자, 시청자 수 그대로, 송출자에게 알리지 않음)
  *       → 없으면 새 viewerId 로 새로 입장 (resumed:false)
+ *   영상이 끊겨 처음부터 다시 입장하는 시청자: {"type":"join","role":"viewer","viewerId":"이전 id","startOver":true}
+ *       → 이전 자리를 바로 비우고(송출자에게 viewer-left) 새 viewerId 로 입장 (resumed:false)
  * 이후에는 signal 메시지(SDP offer/answer, ICE candidate)를 상대에게 그대로 전달합니다.
  * 송출자 연결이 끊겨도 방송을 바로 종료하지 않습니다(재연결 유예). 서버가 내려갈 때는 열린 연결을 4001로 닫습니다.
  */
@@ -126,7 +128,8 @@ public class SignalingHandler extends TextWebSocketHandler implements SmartLifec
         }
         // 재연결: 이전 viewerId 가 아직 시청자 집합에 있으면 같은 시청자로 이어 붙음 (시청자 수·송출자 알림 없음)
         String previousId = text(msg, "viewerId");
-        if (previousId != null) {
+        boolean startOver = msg.path("startOver").asBoolean(false);
+        if (previousId != null && !startOver) {
             // 응답 전에 이 연결의 역할을 정해 두어야, 이어 붙자마자 오는 시그널을 받아 전달할 수 있습니다.
             raw.getAttributes().put(ATTR_ROLE, "viewer");
             raw.getAttributes().put(ATTR_VIEWER_ID, previousId);
@@ -141,7 +144,8 @@ public class SignalingHandler extends TextWebSocketHandler implements SmartLifec
         String viewerId = WebSockets.newViewerId();
         raw.getAttributes().put(ATTR_ROLE, "viewer");
         raw.getAttributes().put(ATTR_VIEWER_ID, viewerId);
-        if (liveState.attachViewer(id, viewerId, session, maxViewers) == BroadcastLiveState.JoinResult.FULL) {
+        String startingOver = startOver ? previousId : null;
+        if (liveState.attachViewer(id, viewerId, session, maxViewers, startingOver) == BroadcastLiveState.JoinResult.FULL) {
             raw.getAttributes().remove(ATTR_ROLE);
             raw.getAttributes().remove(ATTR_VIEWER_ID);
             WebSockets.send(session, Map.of("type", "full", "max", maxViewers));
