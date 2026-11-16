@@ -37,7 +37,7 @@ public class BroadcastService {
     private final BroadcastLiveState liveState;
     /** 재연결 유예: 송출 연결이 끊긴 뒤 이 시간 안에 돌아오지 않으면 종료합니다. 끊긴 시청자 자리도 이 시간 동안 남겨 둡니다. */
     private final Duration reconnectGrace;
-    private final AtomicBoolean startupGraceGiven = new AtomicBoolean();
+    private final AtomicBoolean startupRecovered = new AtomicBoolean();
 
     public BroadcastService(BroadcastRepository repository, UserRepository users, BroadcastLiveState liveState,
                             @Value("${app.live.reconnect-grace:20s}") Duration reconnectGrace) {
@@ -129,7 +129,7 @@ public class BroadcastService {
     @Scheduled(fixedDelayString = "${app.live.sweep-interval-ms:10000}", initialDelayString = "${app.live.sweep-interval-ms:10000}")
     @Transactional
     public void sweep() {
-        giveGraceToLiveBroadcastsOnStartup();
+        recoverLiveBroadcastsOnStartup();
         Instant now = Instant.now();
         Instant neverConnectedCutoff = now.minus(HOST_CONNECT_GRACE);
         Instant graceCutoff = now.minus(reconnectGrace);
@@ -157,17 +157,19 @@ public class BroadcastService {
     }
 
     /**
-     * 서버가 뜰 때 방송 중인 방송을 종료하지 않습니다(스케일 아웃·재시작이 방송 종료가 되지 않도록).
-     * 송출자 상태를 모르는 방송은 지금 끊긴 것으로 기록해, 송출 화면이 재연결 유예 안에 돌아오지 않을 때만 종료되게 합니다.
+     * 서버가 뜰 때 방송 중인 방송을 종료하지 않습니다(재시작이 방송 종료가 되지 않도록).
+     * 재시작으로 송출자 기록을 잃은 방송은 송출 화면이 재연결 유예 안에 돌아오지 않을 때만 종료됩니다.
+     * 기록을 서버 밖에 두는 cluster 프로필에서는 서버가 하나 더 떠도 어떤 방송의 결과도 바뀌지 않습니다
+     * ({@link BroadcastLiveState#recoverAfterRestart}).
      * 첫 정리 작업 전에 끝나도록 정리 작업도 처음 한 번 이 작업을 먼저 합니다.
      */
     @EventListener(ApplicationReadyEvent.class)
     @Transactional(readOnly = true)
-    public void giveGraceToLiveBroadcastsOnStartup() {
-        if (startupGraceGiven.getAndSet(true)) return;
+    public void recoverLiveBroadcastsOnStartup() {
+        if (startupRecovered.getAndSet(true)) return;
         Instant now = Instant.now();
         for (Broadcast b : repository.findAllByStatusOrderByStartedAtDesc(Broadcast.Status.LIVE)) {
-            liveState.markHostDisconnectedIfUnknown(b.getId(), now);
+            liveState.recoverAfterRestart(b.getId(), now);
         }
     }
 

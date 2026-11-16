@@ -138,13 +138,6 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
             return 1
             """, Long.class);
 
-    /** KEYS[1]=host, ARGV: 시각(ms) → 기록이 아예 없으면 끊긴 것으로 기록 */
-    private static final RedisScript<Long> MARK_HOST_UNKNOWN = RedisScript.of("""
-            if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
-            redis.call('HSET', KEYS[1], 'disconnectedAt', ARGV[1])
-            return 1
-            """, Long.class);
-
     /**
      * KEYS[1]=viewers, KEYS[2]=viewers-disconnected, ARGV: viewerId, 죽은 인스턴스 id, 채널, viewer-left 봉투
      * → 아직 그 인스턴스에 연결된 것으로 남은 시청자면 퇴장시키고 1. 그사이 다른 인스턴스로 이어 붙었거나
@@ -316,9 +309,12 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
         return redis.opsForHash().hasKey(viewersKey(id), viewerId);
     }
 
+    /**
+     * 기록이 Redis 에 있어 이 서버가 떴다고 사라지지 않습니다. 송출자 기록이 없는 방송은 송출자가 아직 한 번도 붙지 않은 방송이고
+     * 시작 후 30초 규칙을 그대로 받아야 하므로 아무것도 하지 않습니다. 죽은 서버 소속 기록은 {@link #releaseDeadInstances}가 정리합니다.
+     */
     @Override
-    public void markHostDisconnectedIfUnknown(long id, Instant at) {
-        redis.execute(MARK_HOST_UNKNOWN, List.of(hostKey(id)), String.valueOf(at.toEpochMilli()));
+    public void recoverAfterRestart(long id, Instant at) {
     }
 
     @Override

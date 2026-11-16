@@ -53,10 +53,13 @@ public interface BroadcastLiveState {
     boolean detachHost(long broadcastId, WebSocketSession host);
 
     /**
-     * 송출자 기록이 아예 없으면 이 시각에 끊긴 것으로 기록합니다. 서버 재시작 직후처럼 송출자 상태를 모르는 방송 중인 방송을
-     * 바로 종료하지 않고 재연결 유예를 주기 위해 씁니다. 이미 기록이 있으면(연결 중·끊김) 그대로 둡니다.
+     * 이 서버가 뜬 직후, 방송 중인 방송마다 한 번 불립니다.
+     * 기록을 서버 메모리에만 두어 재시작으로 잃는 구현은, 송출자 기록이 없는 방송을 이 시각에 끊긴 것으로 기록해
+     * 바로 종료하지 않고 재연결 유예를 줍니다.
+     * 기록을 서버 밖에 함께 두는 구현은 아무것도 하지 않습니다. 서버 하나가 뜬다고 기록이 사라지지 않으므로
+     * 서버를 늘려도(스케일 아웃) 어떤 방송의 결과도 바뀌지 않아야 합니다(송출자가 아직 붙지 않은 방송은 시작 후 30초 규칙 그대로).
      */
-    void markHostDisconnectedIfUnknown(long broadcastId, Instant at);
+    void recoverAfterRestart(long broadcastId, Instant at);
 
     /** 송출자 연결이 끊긴 상태면 끊긴 시각. 연결 중이거나 한 번도 연결된 적이 없으면 비어 있음 */
     Optional<Instant> hostDisconnectedAt(long broadcastId);

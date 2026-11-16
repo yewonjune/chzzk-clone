@@ -172,6 +172,23 @@ class ClusterFailoverTest {
     }
 
     @Test
+    void 새_서버가_기동해도_송출자가_아직_붙지_않은_방송은_시작_후_30초_규칙을_그대로_받는다() throws Exception {
+        ApiClient owner = ApiClient.signUp(cluster.b, unique("host"), "스트리머" + seq.get());
+        long id = json(owner.postJson("/api/broadcasts", "{\"title\":\"막 시작한 방송\"}")).get("id").asLong();
+
+        Cluster.Server c = cluster.startServer(); // 송출 화면이 붙기 전에 스케일 아웃
+        // 재연결 유예(2초)가 지나도 종료되지 않음: 시작 후 30초 안에 송출자가 붙을 수 있어야 함
+        Thread.sleep(BroadcastFlowTest.GRACE_MS + 1_500);
+        assertThat(status(c.base(), id)).isEqualTo("live");
+
+        Socket host = owner.socket("/ws/broadcasts/" + id);
+        host.send("{\"type\":\"join\",\"role\":\"host\"}");
+        assertThat(host.next("viewers")).isNotNull();
+        assertThat(received(host, "error")).isFalse();
+        c.stop();
+    }
+
+    @Test
     void 강제로_죽은_서버의_시청자_기록은_하트비트_TTL_뒤_정리되어_시청자_수와_상한이_돌아오고_그_서버의_송출자는_유예_뒤_종료된다() throws Exception {
         Live live = liveOn(cluster.b);
         Cluster.ProcessServer doomed = cluster.startProcess();

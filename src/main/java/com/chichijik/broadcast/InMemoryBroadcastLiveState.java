@@ -16,7 +16,7 @@ import org.springframework.web.socket.WebSocketSession;
 /**
  * 방송 실시간 상태의 메모리 구현(기본 프로필, 단일 인스턴스). cluster 프로필에서는 {@link RedisBroadcastLiveState}.
  * 방송 중인 방송마다 송출자 기록 1개와 시청자 집합(WebSocket 연결)을 이 인스턴스 메모리에 들고 있습니다.
- * 서버가 재시작되면 기록이 사라지므로, 재시작 직후의 방송은 {@link #markHostDisconnectedIfUnknown}으로 유예를 받습니다.
+ * 서버가 재시작되면 기록이 사라지므로, 재시작 직후의 방송은 {@link #recoverAfterRestart}로 유예를 받습니다.
  */
 @Component
 @Profile("!cluster")
@@ -117,8 +117,9 @@ public class InMemoryBroadcastLiveState implements BroadcastLiveState {
         }
     }
 
+    /** 재시작으로 기록을 모두 잃었으므로, 송출자 기록이 없는 방송은 이 시각에 끊긴 것으로 보고 재연결 유예를 줍니다. */
     @Override
-    public void markHostDisconnectedIfUnknown(long id, Instant at) {
+    public void recoverAfterRestart(long id, Instant at) {
         Room r = room(id);
         synchronized (r) {
             if (r.host == null && r.hostDisconnectedAt == null) r.hostDisconnectedAt = at;
