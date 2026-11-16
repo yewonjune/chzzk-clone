@@ -33,13 +33,13 @@ public class SignalingHandler extends TextWebSocketHandler {
     private static final String ATTR_SAFE = "safeSession";
 
     private final BroadcastService service;
-    private final LiveRooms rooms;
+    private final BroadcastLiveState liveState;
     private final int maxViewers;
 
-    public SignalingHandler(BroadcastService service, LiveRooms rooms,
+    public SignalingHandler(BroadcastService service, BroadcastLiveState liveState,
                             @Value("${app.live.max-viewers}") int maxViewers) {
         this.service = service;
-        this.rooms = rooms;
+        this.liveState = liveState;
         this.maxViewers = maxViewers;
     }
 
@@ -47,7 +47,7 @@ public class SignalingHandler extends TextWebSocketHandler {
     public void afterConnectionEstablished(WebSocketSession session) {
         Long id = parseId(session);
         if (id == null) {
-            LiveRooms.closeQuietly(session, CloseStatus.BAD_DATA);
+            WebSockets.closeQuietly(session, CloseStatus.BAD_DATA);
             return;
         }
         session.getAttributes().put(ATTR_ID, id);
@@ -79,9 +79,9 @@ public class SignalingHandler extends TextWebSocketHandler {
         Object data = JSON.convertValue(msg.get("data"), Object.class);
         if ("host".equals(role)) {
             String to = text(msg, "to");
-            if (to != null) rooms.relayToViewer(id, to, data);
+            if (to != null) liveState.relayToViewer(id, to, data);
         } else {
-            rooms.relayToHost(id, (String) raw.getAttributes().get(ATTR_VIEWER_ID), data);
+            liveState.relayToHost(id, (String) raw.getAttributes().get(ATTR_VIEWER_ID), data);
         }
     }
 
@@ -91,24 +91,24 @@ public class SignalingHandler extends TextWebSocketHandler {
             LoginUser me = loginUser(raw);
             if (me == null || !service.canHost(id, me)) {
                 String reason = me == null ? "로그인이 필요합니다." : "이 방송의 소유자만 송출할 수 있습니다. (또는 이미 종료된 방송)";
-                LiveRooms.send(session, Map.of("type", "error", "message", reason));
-                LiveRooms.closeQuietly(raw, CloseStatus.POLICY_VIOLATION);
+                WebSockets.send(session, Map.of("type", "error", "message", reason));
+                WebSockets.closeQuietly(raw, CloseStatus.POLICY_VIOLATION);
                 return;
             }
             raw.getAttributes().put(ATTR_ROLE, "host");
-            rooms.attachHost(id, session);
+            liveState.attachHost(id, session);
             return;
         }
 
         if (!service.isLive(id)) {
-            LiveRooms.send(session, Map.of("type", "ended"));
-            LiveRooms.closeQuietly(raw, CloseStatus.NORMAL);
+            WebSockets.send(session, Map.of("type", "ended"));
+            WebSockets.closeQuietly(raw, CloseStatus.NORMAL);
             return;
         }
-        String viewerId = LiveRooms.newViewerId();
-        if (rooms.attachViewer(id, viewerId, session, maxViewers) == LiveRooms.JoinResult.FULL) {
-            LiveRooms.send(session, Map.of("type", "full", "max", maxViewers));
-            LiveRooms.closeQuietly(raw, CloseStatus.NORMAL);
+        String viewerId = WebSockets.newViewerId();
+        if (liveState.attachViewer(id, viewerId, session, maxViewers) == BroadcastLiveState.JoinResult.FULL) {
+            WebSockets.send(session, Map.of("type", "full", "max", maxViewers));
+            WebSockets.closeQuietly(raw, CloseStatus.NORMAL);
             return;
         }
         raw.getAttributes().put(ATTR_ROLE, "viewer");
@@ -122,9 +122,9 @@ public class SignalingHandler extends TextWebSocketHandler {
         if (id == null || role == null) return;
         if ("host".equals(role)) {
             // 송출자 연결이 끊기면 즉시 종료 (교체된 이전 연결이면 무시)
-            if (rooms.detachHost(id, safe(raw))) service.endBecauseHostLeft(id);
+            if (liveState.detachHost(id, safe(raw))) service.endBecauseHostLeft(id);
         } else {
-            rooms.detachViewer(id, (String) raw.getAttributes().get(ATTR_VIEWER_ID));
+            liveState.detachViewer(id, (String) raw.getAttributes().get(ATTR_VIEWER_ID));
         }
     }
 

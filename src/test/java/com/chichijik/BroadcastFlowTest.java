@@ -3,7 +3,15 @@ package com.chichijik;
 import static com.chichijik.ApiClient.json;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.net.http.HttpResponse;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -126,6 +134,58 @@ class BroadcastFlowTest {
             assertThat(list.size()).isEqualTo(2);
             for (JsonNode n : list) assertThat(n.get("status").asString()).isEqualTo("ended");
             assertThat(json(guest.get("/api/broadcasts/" + leftoverId)).get("streamer").asString()).isEqualTo("방송인");
+        }
+    }
+
+    @Test
+    void 같은_방송을_동시에_여러번_종료해도_종료는_한번만_일어나고_종료알림도_한번() throws Exception {
+        try (var app = ApiClient.startServer(dataDir)) {
+            String base = ApiClient.baseUrl(app);
+            ApiClient owner = ApiClient.signUp(base, "streamer3", "동시종료");
+            ApiClient guest = ApiClient.anonymous(base);
+            long id = json(owner.postJson("/api/broadcasts", "{\"title\":\"곧 끝남\"}")).get("id").asLong();
+
+            Socket host = owner.socket("/ws/broadcasts/" + id);
+            host.send("{\"type\":\"join\",\"role\":\"host\"}");
+            Socket viewer = guest.socket("/ws/broadcasts/" + id);
+            viewer.send("{\"type\":\"join\",\"role\":\"viewer\"}");
+            host.next("viewer-joined");
+
+            // 소유자가 종료 버튼을 여러 번(동시에) 누름
+            int n = 8;
+            var pool = Executors.newFixedThreadPool(n);
+            var start = new CountDownLatch(1);
+            List<Future<HttpResponse<String>>> calls = new ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                calls.add(pool.submit(() -> {
+                    start.await();
+                    return owner.post("/api/broadcasts/" + id + "/end");
+                }));
+            }
+            start.countDown();
+            Set<String> endedAts = new HashSet<>();
+            for (var c : calls) {
+                HttpResponse<String> res = c.get();
+                assertThat(res.statusCode()).isEqualTo(200);
+                endedAts.add(json(res).get("endedAt").asString());
+            }
+            pool.shutdown();
+
+            // 종료 시각은 하나뿐이고, 조회해도 같은 시각
+            assertThat(endedAts).hasSize(1);
+            assertThat(json(guest.get("/api/broadcasts/" + id)).get("endedAt").asString()).isEqualTo(endedAts.iterator().next());
+
+            // 이미 종료된 방송을 다시 종료해도 결과는 그대로
+            JsonNode again = json(owner.post("/api/broadcasts/" + id + "/end"));
+            assertThat(again.get("status").asString()).isEqualTo("ended");
+            assertThat(again.get("endedAt").asString()).isEqualTo(endedAts.iterator().next());
+
+            // 송출자·시청자 모두 ended 를 정확히 한 번 받음
+            assertThat(viewer.next("ended")).isNotNull();
+            assertThat(host.next("ended")).isNotNull();
+            Thread.sleep(500);
+            assertThat(viewer.inbox).noneMatch(m -> "ended".equals(m.get("type").asString()));
+            assertThat(host.inbox).noneMatch(m -> "ended".equals(m.get("type").asString()));
         }
     }
 

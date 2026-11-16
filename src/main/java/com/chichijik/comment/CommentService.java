@@ -10,7 +10,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.chichijik.broadcast.Broadcast;
 import com.chichijik.broadcast.BroadcastRepository;
-import com.chichijik.broadcast.LiveRooms;
+import com.chichijik.broadcast.BroadcastLiveState;
 import com.chichijik.common.AfterCommit;
 import com.chichijik.common.ApiException;
 import com.chichijik.common.Ownership;
@@ -37,15 +37,15 @@ public class CommentService {
     private final BroadcastRepository broadcasts;
     private final ReplayRepository replays;
     private final UserRepository users;
-    private final LiveRooms rooms;
+    private final BroadcastLiveState liveState;
 
     public CommentService(CommentRepository comments, BroadcastRepository broadcasts, ReplayRepository replays,
-                          UserRepository users, LiveRooms rooms) {
+                          UserRepository users, BroadcastLiveState liveState) {
         this.comments = comments;
         this.broadcasts = broadcasts;
         this.replays = replays;
         this.users = users;
-        this.rooms = rooms;
+        this.liveState = liveState;
     }
 
     /** 목록 조회는 공개 */
@@ -113,7 +113,7 @@ public class CommentService {
         Broadcast b = c.getBroadcast();
         if (b == null || !b.isLive()) return;
         long id = b.getId();
-        AfterCommit.run(() -> rooms.sendToAll(id, message));
+        AfterCommit.run(() -> liveState.sendToAll(id, message));
     }
 
     private void requireTargetExists(Target target, long id) {

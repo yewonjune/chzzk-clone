@@ -1,36 +1,21 @@
 package com.chichijik.broadcast;
 
-import java.io.IOException;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.CloseStatus;
-import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 
-import tools.jackson.databind.json.JsonMapper;
-
 /**
- * 방송 중인 방송마다 송출자 1명과 시청자 연결(WebSocket)을 메모리에 들고 있는 방(room) 목록.
- * 서버는 영상을 받지 않고, 송출자와 시청자 사이의 WebRTC 연결 정보만 전달합니다.
- *
- * 프로토콜 (모두 JSON 텍스트 메시지)
- *   서버 → 송출자 : viewer-joined{viewerId}, viewer-left{viewerId}, signal{from, data}, viewers{count}
- *   송출자 → 서버 : signal{to, data}
- *   서버 → 시청자 : signal{data}, viewers{count}, ended, full
- *   시청자 → 서버 : signal{data}
+ * 방송 실시간 상태의 메모리 구현(기본 프로필, 단일 인스턴스).
+ * 방송 중인 방송마다 송출자 1명과 시청자 연결(WebSocket)을 이 인스턴스 메모리에 들고 있습니다.
  */
 @Component
-public class LiveRooms {
-
-    private static final Logger log = LoggerFactory.getLogger(LiveRooms.class);
-    private static final JsonMapper JSON = JsonMapper.builder().build();
+public class InMemoryBroadcastLiveState implements BroadcastLiveState {
 
     private final Map<Long, Room> rooms = new ConcurrentHashMap<>();
 
@@ -39,13 +24,12 @@ public class LiveRooms {
         final Map<String, WebSocketSession> viewers = new LinkedHashMap<>();
     }
 
-    public enum JoinResult { OK, FULL }
-
     private Room room(long id) {
         return rooms.computeIfAbsent(id, k -> new Room());
     }
 
     /** 송출자 연결. 이미 연결된 송출자가 있으면 이전 연결을 끊고 교체합니다. 대기 중인 시청자를 알려줍니다. */
+    @Override
     public void attachHost(long id, WebSocketSession host) {
         Room r = room(id);
         WebSocketSession previous;
@@ -55,11 +39,12 @@ public class LiveRooms {
             r.host = host;
             waiting = List.copyOf(r.viewers.keySet());
         }
-        if (previous != null && previous.isOpen()) closeQuietly(previous, CloseStatus.POLICY_VIOLATION);
-        for (String viewerId : waiting) send(host, Map.of("type", "viewer-joined", "viewerId", viewerId));
+        if (previous != null && previous.isOpen()) WebSockets.closeQuietly(previous, CloseStatus.POLICY_VIOLATION);
+        for (String viewerId : waiting) WebSockets.send(host, Map.of("type", "viewer-joined", "viewerId", viewerId));
         broadcastViewerCount(id);
     }
 
+    @Override
     public JoinResult attachViewer(long id, String viewerId, WebSocketSession viewer, int maxViewers) {
         Room r = room(id);
         WebSocketSession host;
@@ -68,12 +53,13 @@ public class LiveRooms {
             r.viewers.put(viewerId, viewer);
             host = r.host;
         }
-        if (host != null) send(host, Map.of("type", "viewer-joined", "viewerId", viewerId));
+        if (host != null) WebSockets.send(host, Map.of("type", "viewer-joined", "viewerId", viewerId));
         broadcastViewerCount(id);
         return JoinResult.OK;
     }
 
     /** @return 이 세션이 현재 송출자였으면 true (송출 종료 처리 필요) */
+    @Override
     public boolean detachHost(long id, WebSocketSession session) {
         Room r = rooms.get(id);
         if (r == null) return false;
@@ -84,6 +70,7 @@ public class LiveRooms {
         }
     }
 
+    @Override
     public void detachViewer(long id, String viewerId) {
         Room r = rooms.get(id);
         if (r == null) return;
@@ -92,10 +79,11 @@ public class LiveRooms {
             if (r.viewers.remove(viewerId) == null) return;
             host = r.host;
         }
-        if (host != null) send(host, Map.of("type", "viewer-left", "viewerId", viewerId));
+        if (host != null) WebSockets.send(host, Map.of("type", "viewer-left", "viewerId", viewerId));
         broadcastViewerCount(id);
     }
 
+    @Override
     public void relayToViewer(long id, String viewerId, Object data) {
         Room r = rooms.get(id);
         if (r == null) return;
@@ -103,9 +91,10 @@ public class LiveRooms {
         synchronized (r) {
             viewer = r.viewers.get(viewerId);
         }
-        if (viewer != null) send(viewer, Map.of("type", "signal", "data", data));
+        if (viewer != null) WebSockets.send(viewer, Map.of("type", "signal", "data", data));
     }
 
+    @Override
     public void relayToHost(long id, String viewerId, Object data) {
         Room r = rooms.get(id);
         if (r == null) return;
@@ -113,11 +102,12 @@ public class LiveRooms {
         synchronized (r) {
             host = r.host;
         }
-        if (host != null) send(host, Map.of("type", "signal", "from", viewerId, "data", data));
+        if (host != null) WebSockets.send(host, Map.of("type", "signal", "from", viewerId, "data", data));
     }
 
     /** 방송 종료: 시청자에게 ended를 보내고 모든 연결을 닫은 뒤 방을 없앱니다. */
-    public void close(long id) {
+    @Override
+    public void ended(long id) {
         Room r = rooms.remove(id);
         if (r == null) return;
         List<WebSocketSession> all;
@@ -129,27 +119,29 @@ public class LiveRooms {
             r.host = null;
         }
         for (WebSocketSession v : all) {
-            send(v, Map.of("type", "ended"));
-            closeQuietly(v, CloseStatus.NORMAL);
+            WebSockets.send(v, Map.of("type", "ended"));
+            WebSockets.closeQuietly(v, CloseStatus.NORMAL);
         }
         if (host != null) {
-            send(host, Map.of("type", "ended"));
-            closeQuietly(host, CloseStatus.NORMAL);
+            WebSockets.send(host, Map.of("type", "ended"));
+            WebSockets.closeQuietly(host, CloseStatus.NORMAL);
         }
     }
 
     /** 방송 중인 방의 송출자·시청자 모두에게 보냅니다 (댓글, 제목 변경 등) */
+    @Override
     public void sendToAll(long id, Map<String, ?> message) {
         Room r = rooms.get(id);
         if (r == null) return;
         List<WebSocketSession> targets;
         synchronized (r) {
-            targets = new java.util.ArrayList<>(r.viewers.values());
+            targets = new ArrayList<>(r.viewers.values());
             if (r.host != null) targets.add(r.host);
         }
-        for (WebSocketSession s : targets) send(s, message);
+        for (WebSocketSession s : targets) WebSockets.send(s, message);
     }
 
+    @Override
     public int viewerCount(long id) {
         Room r = rooms.get(id);
         if (r == null) return 0;
@@ -158,6 +150,7 @@ public class LiveRooms {
         }
     }
 
+    @Override
     public boolean hasHost(long id) {
         Room r = rooms.get(id);
         if (r == null) return false;
@@ -172,32 +165,11 @@ public class LiveRooms {
         List<WebSocketSession> targets;
         int count;
         synchronized (r) {
-            targets = new java.util.ArrayList<>(r.viewers.values());
+            targets = new ArrayList<>(r.viewers.values());
             if (r.host != null) targets.add(r.host);
             count = r.viewers.size();
         }
         Map<String, Object> msg = Map.of("type", "viewers", "count", count);
-        for (WebSocketSession s : targets) send(s, msg);
-    }
-
-    static String newViewerId() {
-        return UUID.randomUUID().toString();
-    }
-
-    static void send(WebSocketSession session, Map<String, ?> message) {
-        if (!session.isOpen()) return;
-        try {
-            session.sendMessage(new TextMessage(JSON.writeValueAsString(message)));
-        } catch (IOException | IllegalStateException e) {
-            log.debug("WebSocket 전송 실패: {}", e.getMessage());
-        }
-    }
-
-    static void closeQuietly(WebSocketSession session, CloseStatus status) {
-        try {
-            session.close(status);
-        } catch (IOException ignored) {
-            // 이미 닫힌 연결
-        }
+        for (WebSocketSession s : targets) WebSockets.send(s, msg);
     }
 }
