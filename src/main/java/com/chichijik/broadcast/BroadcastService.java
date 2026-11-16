@@ -40,7 +40,7 @@ public class BroadcastService {
     private final AtomicBoolean startupRecovered = new AtomicBoolean();
 
     public BroadcastService(BroadcastRepository repository, UserRepository users, BroadcastLiveState liveState,
-                            @Value("${app.live.reconnect-grace:20s}") Duration reconnectGrace) {
+                            @Value("${app.live.reconnect-grace}") Duration reconnectGrace) {
         this.repository = repository;
         this.users = users;
         this.liveState = liveState;
@@ -126,7 +126,7 @@ public class BroadcastService {
      * 그 전에 하트비트가 사라진 서버 소속 기록을 정리합니다(송출자는 끊김으로 바뀌어 ②의 유예를 받음).
      * 종료는 조건부 갱신이라 여러 곳에서 동시에 돌아도 종료 알림은 한 번만 나갑니다.
      */
-    @Scheduled(fixedDelayString = "${app.live.sweep-interval-ms:10000}", initialDelayString = "${app.live.sweep-interval-ms:10000}")
+    @Scheduled(fixedDelayString = "${app.live.sweep-interval-ms}", initialDelayString = "${app.live.sweep-interval-ms}")
     @Transactional
     public void sweep() {
         recoverLiveBroadcastsOnStartup();

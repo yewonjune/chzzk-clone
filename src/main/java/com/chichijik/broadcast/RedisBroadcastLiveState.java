@@ -215,8 +215,8 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
     }
 
     public RedisBroadcastLiveState(StringRedisTemplate redis, RedisConnectionFactory connectionFactory,
-                                   @Value("${app.live.heartbeat-interval:5s}") Duration heartbeatInterval,
-                                   @Value("${app.live.heartbeat-ttl:15s}") Duration heartbeatTtl) {
+                                   @Value("${app.live.heartbeat-interval}") Duration heartbeatInterval,
+                                   @Value("${app.live.heartbeat-ttl}") Duration heartbeatTtl) {
         this.redis = redis;
         this.heartbeatTtl = heartbeatTtl;
         // 연결을 받기 전에 살아 있음을 먼저 알림 (다른 인스턴스가 이 인스턴스 소속 기록을 죽은 것으로 보지 않도록)
