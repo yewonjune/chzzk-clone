@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.transaction.PlatformTransactionManager;
 
 /**
  * 어떤 PG를 쓸지 정합니다 (환경변수 PAYMENT_PROVIDER).
@@ -25,7 +26,9 @@ public class PaymentConfig {
                                   @Value("${app.payment.toss.client-key}") String clientKey,
                                   @Value("${app.payment.toss.secret-key}") String secretKey,
                                   @Value("${app.payment.toss.api-base}") String apiBase,
-                                  @Value("${app.payment.toss.read-timeout}") Duration readTimeout) {
+                                  @Value("${app.payment.toss.read-timeout}") Duration readTimeout,
+                                  FakePgPaymentRepository fakePayments,
+                                  PlatformTransactionManager transactionManager) {
         String p = provider == null ? "auto" : provider.strip().toLowerCase();
         boolean hasKeys = !clientKey.isBlank() && !secretKey.isBlank();
         boolean useToss = switch (p) {
@@ -36,7 +39,7 @@ public class PaymentConfig {
         };
         if (!useToss) {
             log.info("결제: 내장 가짜 PG 사용 (토스페이먼츠 테스트 결제를 쓰려면 TOSS_CLIENT_KEY / TOSS_SECRET_KEY 설정)");
-            return new FakePaymentGateway();
+            return new FakePaymentGateway(fakePayments, transactionManager);
         }
         if (!hasKeys) {
             throw new IllegalStateException("PAYMENT_PROVIDER=toss 이면 TOSS_CLIENT_KEY 와 TOSS_SECRET_KEY 가 필요합니다.");

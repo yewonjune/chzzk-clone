@@ -27,12 +27,43 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'org.springframework.boot:spring-boot-starter-websocket'
     implementation 'org.springframework.boot:spring-boot-starter-security'
+    // 5단계 운영: Kubernetes liveness·readiness probe (/actuator/health/**)
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    // 5단계 cluster 프로필: 로그인 세션을 Redis 에 공유 (기본 프로필에서는 자동 구성을 끔)
+    implementation 'org.springframework.boot:spring-boot-starter-session-data-redis'
     runtimeOnly 'com.h2database:h2'
+    runtimeOnly 'org.postgresql:postgresql'
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    // cluster 태그 테스트 전용 (Docker 필요). 버전은 Spring Boot BOM 이 관리
+    testImplementation 'org.testcontainers:testcontainers'
+    testImplementation 'org.testcontainers:testcontainers-postgresql'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
+// 실행 jar 는 build/libs/chichijik.jar 하나만 (이미지 빌드가 이름으로 바로 복사). 의존성 없는 plain jar 는 만들지 않음
+tasks.named('bootJar') {
+    archiveFileName = 'chichijik.jar'
+}
+tasks.named('jar') {
+    enabled = false
+}
+
+// 기본 테스트: Docker 없이 도는 단일 서버 테스트만
 tasks.named('test') {
-    useJUnitPlatform()
+    useJUnitPlatform {
+        excludeTags 'cluster'
+    }
+}
+
+// 서버 2대(cluster 프로필) 테스트: Testcontainers 로 PostgreSQL·Redis 를 띄우므로 Docker 필요
+tasks.register('clusterTest', Test) {
+    description = 'cluster 프로필로 서버 2대를 띄워 상태 공유를 확인합니다 (Docker 필요).'
+    group = 'verification'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform {
+        includeTags 'cluster'
+    }
+    shouldRunAfter tasks.named('test')
 }

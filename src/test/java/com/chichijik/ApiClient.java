@@ -15,9 +15,11 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import org.springframework.boot.builder.SpringApplicationBuilder;
@@ -37,14 +39,33 @@ final class ApiClient {
     static final Duration WAIT = Duration.ofSeconds(5);
 
     final String base;
-    final CookieManager cookies = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
-    final HttpClient http = HttpClient.newBuilder().cookieHandler(cookies).build();
+    final CookieManager cookies;
+    final HttpClient http;
     private String csrfHeader;
     private String csrfToken;
     JsonNode user;
 
     private ApiClient(String base) {
         this.base = base;
+        this.cookies = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
+        this.http = HttpClient.newBuilder().cookieHandler(cookies).build();
+    }
+
+    private ApiClient(String base, ApiClient same) {
+        this.base = base;
+        this.cookies = same.cookies;
+        this.http = same.http;
+        this.csrfHeader = same.csrfHeader;
+        this.csrfToken = same.csrfToken;
+        this.user = same.user;
+    }
+
+    /**
+     * 같은 브라우저(같은 쿠키·CSRF 토큰)가 로드밸런서 뒤의 다른 서버로 보내는 요청.
+     * 쿠키는 포트를 구분하지 않으므로 localhost 의 A·B 서버에 같은 세션 쿠키가 실립니다.
+     */
+    ApiClient on(String otherBase) {
+        return new ApiClient(otherBase, this);
     }
 
     // ---- 서버 기동 ----
@@ -67,6 +88,11 @@ final class ApiClient {
         ApiClient c = new ApiClient(base);
         c.refreshMe();
         return c;
+    }
+
+    /** 세션 없이 보내는 호출 (Kubernetes probe 처럼: 세션 저장소가 멈춰도 요청이 막히지 않게 /api/auth/me 를 부르지 않음) */
+    static ApiClient anonymousWithoutSession(String base) {
+        return new ApiClient(base);
     }
 
     static ApiClient signUp(String base, String username, String nickname) throws Exception {
@@ -180,6 +206,8 @@ final class ApiClient {
     static final class Socket implements WebSocket.Listener {
         WebSocket ws;
         final BlockingQueue<JsonNode> inbox = new LinkedBlockingQueue<>();
+        /** 서버가 연결을 닫을 때 보낸 종료 코드 */
+        final CompletableFuture<Integer> closeCode = new CompletableFuture<>();
         private final StringBuilder partial = new StringBuilder();
 
         void send(String text) {
@@ -187,7 +215,12 @@ final class ApiClient {
         }
 
         JsonNode next(String type) throws InterruptedException {
-            long deadline = System.nanoTime() + WAIT.toNanos();
+            return next(type, WAIT);
+        }
+
+        /** 최대 wait 동안 type 메시지를 기다림 (하트비트 TTL·재연결 유예처럼 기본 대기보다 오래 걸리는 경우) */
+        JsonNode next(String type, Duration wait) throws InterruptedException {
+            long deadline = System.nanoTime() + wait.toNanos();
             while (System.nanoTime() < deadline) {
                 JsonNode m = inbox.poll(50, TimeUnit.MILLISECONDS);
                 if (m != null && type.equals(m.get("type").asString())) return m;
@@ -195,8 +228,48 @@ final class ApiClient {
             throw new AssertionError("메시지를 받지 못함: " + type);
         }
 
+        /** type 이 같고 조건에 맞는 메시지가 올 때까지 기다림 (중간에 온 다른 값은 건너뜀) */
+        JsonNode nextWhere(String type, Predicate<JsonNode> condition) throws InterruptedException {
+            return nextWhere(type, condition, WAIT);
+        }
+
+        JsonNode nextWhere(String type, Predicate<JsonNode> condition, Duration wait) throws InterruptedException {
+            long deadline = System.nanoTime() + wait.toNanos();
+            while (System.nanoTime() < deadline) {
+                JsonNode m = inbox.poll(50, TimeUnit.MILLISECONDS);
+                if (m != null && type.equals(m.get("type").asString()) && condition.test(m)) return m;
+            }
+            throw new AssertionError("조건에 맞는 메시지를 받지 못함: " + type);
+        }
+
+        /** 지금부터 잠시 기다리는 동안 type 메시지가 몇 개 더 오는지 */
+        int countWithin(String type, Duration wait) throws InterruptedException {
+            int n = 0;
+            long deadline = System.nanoTime() + wait.toNanos();
+            while (System.nanoTime() < deadline) {
+                JsonNode m = inbox.poll(50, TimeUnit.MILLISECONDS);
+                if (m != null && type.equals(m.get("type").asString())) n++;
+            }
+            return n;
+        }
+
         void close() {
             ws.sendClose(WebSocket.NORMAL_CLOSURE, "bye").join();
+        }
+
+        /** 종료 핸드셰이크 없이 TCP 연결을 끊음 (네트워크가 끊긴 것처럼 비정상 종료) */
+        void drop() {
+            ws.abort();
+        }
+
+        int awaitCloseCode() throws Exception {
+            return closeCode.get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
+        }
+
+        @Override
+        public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
+            closeCode.complete(statusCode);
+            return null;
         }
 
         @Override

@@ -1,0 +1,121 @@
+# 치치직 서버: cluster 프로필로 여러 개 (개수는 HPA 가 2~5개로 조정하므로 replicas 를 적지 않음)
+# 이미지: 로컬에서 만든 chichijik:local 을 그대로 사용 (docker build -t chichijik:local .)
+#         Docker Desktop Kubernetes 는 Docker 와 이미지 저장소를 같이 쓰므로 레지스트리 push 가 필요 없음.
+#         다시 빌드한 뒤에는 kubectl -n chichijik rollout restart deployment/chichijik
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chichijik
+  namespace: chichijik
+spec:
+  selector:
+    matchLabels:
+      app: chichijik
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: chichijik
+    spec:
+      # 종료 순서: preStop 대기(5초) → SIGTERM → graceful shutdown(종료 단계 최대 90초) → 120초가 지나면 강제 종료
+      terminationGracePeriodSeconds: 120
+      # Service 마다 자동으로 들어오는 환경변수(REDIS_PORT=tcp://10.x.x.x:6379 등)를 끔.
+      # 켜 두면 앱이 읽는 REDIS_PORT 를 덮어써 기동에 실패함
+      enableServiceLinks: false
+      securityContext:
+        # 업로드 공유 볼륨에 이미지의 실행 사용자(uid 10001)가 쓸 수 있도록
+        fsGroup: 10001
+      containers:
+        - name: chichijik
+          image: chichijik:local
+          # 로컬 이미지만 사용 (레지스트리에서 받지 않음). 빌드하지 않았으면 ErrImageNeverPull 로 바로 드러남
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: management
+              containerPort: 8081
+          # 비밀 값(DB 계정, Redis 비밀번호, SSL 키스토어 비밀번호, 토스 테스트 키 …): .env.cluster 로 만든 Secret
+          envFrom:
+            - secretRef:
+                name: chichijik-env
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: cluster
+            - name: DB_URL
+              value: jdbc:postgresql://postgres:5432/chichijik
+            - name: REDIS_HOST
+              value: redis
+            - name: REDIS_PORT
+              value: "6379"
+            - name: UPLOAD_DIR
+              value: /data/uploads
+            # HTTPS(SSL_ENABLED=true)일 때 사용할 키스토어: Secret chichijik-tls 를 아래 볼륨으로 마운트
+            - name: SSL_KEYSTORE
+              value: /etc/chichijik/tls/keystore.p12
+            # probe 는 HTTPS 여부와 관계없이 별도 포트의 HTTP 로 (앱 포트가 HTTPS 여도 kubelet 이 그대로 확인)
+            - name: MANAGEMENT_SERVER_PORT
+              value: "8081"
+            - name: MANAGEMENT_SERVER_SSL_ENABLED
+              value: "false"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          # 기동(스키마 준비 포함)이 끝날 때까지 liveness 판단을 미룸: 최대 5초 x 36 = 3분
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: management }
+            periodSeconds: 5
+            failureThreshold: 36
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: management }
+            periodSeconds: 10
+            failureThreshold: 3
+          # DB·Redis 중 하나라도 응답하지 않으면 Service 대상에서 빠짐 (종료가 시작되면 즉시 빠짐)
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: management }
+            periodSeconds: 5
+            failureThreshold: 2
+          lifecycle:
+            # Service 대상에서 빠지는 것이 반영될 때까지 잠깐 기다린 뒤 SIGTERM (새 요청이 종료 중인 Pod 로 가지 않게)
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+          volumeMounts:
+            - name: uploads
+              mountPath: /data/uploads
+            - name: tls
+              mountPath: /etc/chichijik/tls
+              readOnly: true
+      volumes:
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: chichijik-uploads
+        - name: tls
+          secret:
+            secretName: chichijik-tls
+            # HTTP 로만 띄울 때는 이 Secret 을 만들지 않아도 됨
+            optional: true
+---
+# 요청 분배: Docker Desktop 은 LoadBalancer 를 PC 의 8080 포트로 열어 줌 (http://localhost:8080)
+# 같은 Wi-Fi 의 휴대폰은 https://<PC의 IP>:8080 (HTTPS 로 켰을 때, Windows 방화벽에서 8080 허용 필요)
+apiVersion: v1
+kind: Service
+metadata:
+  name: chichijik
+  namespace: chichijik
+spec:
+  type: LoadBalancer
+  selector:
+    app: chichijik
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

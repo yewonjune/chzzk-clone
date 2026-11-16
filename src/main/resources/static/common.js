@@ -86,6 +86,69 @@ window.chi = {
   time: (iso) => new Date(iso).toLocaleString('ko-KR'),
   // 같은 서버의 WebSocket 주소 (https 이면 wss)
   wsUrl: (path) => `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${path}`,
+
+  /**
+   * 자동 재연결하는 시그널링 WebSocket.
+   * - 서버가 4001("다른 서버로 재연결")로 닫으면 바로, 그 외 비정상 종료면 백오프(1·2·4·8초, 최대 10초)하며 다시 연결합니다.
+   * - 서버가 정상 종료(1000: 방송 종료·시청자 가득 참 등)나 정책 위반(1008: 권한 없음·다른 화면이 송출을 이어받음)으로
+   *   닫았거나, 화면이 stop()을 부른 뒤(방송 종료 메시지를 받은 뒤 등)에는 재연결하지 않습니다.
+   * handlers.onOpen(reconnected): 연결될 때마다(처음 false, 재연결 true) 불립니다. join 메시지를 여기서 보냅니다.
+   * handlers.onMessage(msg), handlers.onDisconnect(): 끊겨서 재연결을 기다리는 동안 화면 표시용.
+   */
+  signaling(path, handlers) {
+    const RECONNECT_NOW = 4001;
+    const NO_RECONNECT = [1000, 1008];
+    let ws = null, stopped = false, attempt = 0, timer = null, opened = false;
+
+    function open() {
+      timer = null;
+      if (stopped) return;
+      const sock = new WebSocket(chi.wsUrl(path));
+      ws = sock;
+      sock.onopen = () => {
+        if (sock !== ws || stopped) return;
+        attempt = 0;
+        const reconnected = opened;
+        opened = true;
+        handlers.onOpen?.(reconnected);
+      };
+      sock.onmessage = (ev) => {
+        if (sock !== ws || stopped) return;
+        let m;
+        try { m = JSON.parse(ev.data); } catch { return; }
+        handlers.onMessage?.(m);
+      };
+      sock.onclose = (ev) => {
+        if (sock !== ws || stopped) return; // 이미 바뀐 이전 연결이거나 화면이 끝낸 연결
+        ws = null;
+        if (NO_RECONNECT.includes(ev.code)) { stopped = true; handlers.onClosed?.(ev.code); return; }
+        handlers.onDisconnect?.(ev.code);
+        const delay = ev.code === RECONNECT_NOW && attempt === 0
+          ? 0
+          : Math.min(10_000, 1000 * 2 ** Math.min(attempt, 3)) + Math.floor(Math.random() * 300);
+        attempt++;
+        timer = setTimeout(open, delay);
+      };
+    }
+    // 화면을 다시 보거나 네트워크가 돌아오면 기다리지 않고 바로 시도
+    const retryNow = () => { if (!stopped && !ws && timer) { clearTimeout(timer); open(); } };
+    window.addEventListener('online', retryNow);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') retryNow(); });
+
+    open();
+    return {
+      send(msg) { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); },
+      get connected() { return ws?.readyState === WebSocket.OPEN; },
+      /** 재연결을 멈추고 연결을 닫습니다 (방송 종료·화면 종료 시) */
+      stop() {
+        stopped = true;
+        clearTimeout(timer);
+        const sock = ws;
+        ws = null;
+        sock?.close();
+      },
+    };
+  },
 };
 
 chi.ready = fetch('/api/auth/me', { credentials: 'same-origin' })

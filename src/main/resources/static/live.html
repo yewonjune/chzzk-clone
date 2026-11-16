@@ -49,7 +49,7 @@
   <script>
     const $ = (id) => document.getElementById(id);
     const id = new URLSearchParams(location.search).get('id');
-    let b = null, pc = null, ws = null, pending = [], timer = null, done = false, comments = null, donations = null;
+    let b = null, pc = null, sig = null, viewerId = null, pending = [], timer = null, done = false, comments = null, donations = null;
 
     (async () => {
       try {
@@ -83,30 +83,54 @@
       $('btn-delete').hidden = b.status !== 'ended'; // 방송 중에는 삭제 불가 (서버도 409)
     }
 
+    // 영상(P2P)이 아직 살아 있는지. 살아 있으면 시그널링만 다시 붙고(같은 시청자로 이어 붙기), 아니면 새로 입장합니다.
+    const p2pAlive = () => !!pc && ['connected', 'connecting', 'disconnected'].includes(pc.connectionState);
+
+    // 시그널링 연결은 끊기면 자동으로 다시 연결합니다(서버가 내려가면 4001 → 바로, 그 외 비정상 종료 → 백오프).
+    // 방송 종료(ended)·가득 참(full)을 받으면 stop() 으로 재연결을 멈춥니다.
     function connect(iceServers) {
-      ws = new WebSocket(chi.wsUrl(`/ws/broadcasts/${b.id}`));
-      ws.onopen = () => ws.send(JSON.stringify({ type: 'join', role: 'viewer' }));
-      ws.onmessage = async (ev) => {
-        const m = JSON.parse(ev.data);
-        if (m.type === 'viewers') {
-          $('viewer-count').hidden = false;
-          $('viewer-count').textContent = chi.viewers(m.count);
-        } else if (m.type === 'full') {
-          overlay(`시청자가 가득 찼습니다. (최대 ${m.max}명) 잠시 후 다시 시도해 주세요.`);
-          stop();
-        } else if (m.type === 'ended') {
-          showEnded('방송이 종료되었습니다.');
-        } else if (m.type === 'comment') {
-          comments?.onPush(m);
-        } else if (m.type === 'donation') {
-          donations?.onPush(m);
-        } else if (m.type === 'title') {
-          setTitle(m.title);
-        } else if (m.type === 'signal') {
-          await onSignal(m.data, iceServers);
-        }
-      };
-      ws.onclose = () => { if (!done) overlay('서버와의 연결이 끊겼습니다. 새로고침해 주세요.'); };
+      sig = chi.signaling(`/ws/broadcasts/${b.id}`, {
+        onOpen: (reconnected) => {
+          if (reconnected && viewerId && p2pAlive()) {
+            send({ type: 'join', role: 'viewer', viewerId }); // 같은 시청자로 이어 붙기: 영상은 끊기지 않음
+          } else if (reconnected && viewerId) {
+            // 영상도 끊겼으면 처음부터 다시 입장: 이전 자리는 서버가 바로 비움(시청자 수·상한에 남지 않음)
+            pc?.close(); pc = null; pending = [];
+            send({ type: 'join', role: 'viewer', viewerId, startOver: true });
+          } else {
+            if (reconnected) { pc?.close(); pc = null; pending = []; }
+            send({ type: 'join', role: 'viewer' });
+          }
+        },
+        onMessage: (m) => onMessage(m, iceServers),
+        onDisconnect: () => {
+          if (p2pAlive()) $('viewer-count').textContent = '재연결 중…';
+          else overlay('서버와 다시 연결하는 중…');
+        },
+        onClosed: () => { if (!done) overlay('서버와의 연결이 끊겼습니다. 새로고침해 주세요.'); },
+      });
+    }
+
+    async function onMessage(m, iceServers) {
+      if (m.type === 'joined') {
+        viewerId = m.viewerId;
+      } else if (m.type === 'viewers') {
+        $('viewer-count').hidden = false;
+        $('viewer-count').textContent = chi.viewers(m.count);
+      } else if (m.type === 'full') {
+        overlay(`시청자가 가득 찼습니다. (최대 ${m.max}명) 잠시 후 다시 시도해 주세요.`);
+        stop();
+      } else if (m.type === 'ended') {
+        showEnded('방송이 종료되었습니다.');
+      } else if (m.type === 'comment') {
+        comments?.onPush(m);
+      } else if (m.type === 'donation') {
+        donations?.onPush(m);
+      } else if (m.type === 'title') {
+        setTitle(m.title);
+      } else if (m.type === 'signal') {
+        await onSignal(m.data, iceServers);
+      }
     }
 
     async function onSignal(data, iceServers) {
@@ -192,10 +216,10 @@
       done = true;
       clearInterval(timer);
       pc?.close(); pc = null;
-      ws?.close();
+      sig?.stop();
     }
 
-    function send(msg) { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
+    function send(msg) { sig?.send(msg); }
   </script>
 </body>
 </html>

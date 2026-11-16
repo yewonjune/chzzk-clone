@@ -14,13 +14,18 @@ import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
 
+import org.hibernate.annotations.DynamicUpdate;
+
 import com.chichijik.user.User;
 
 /**
  * 방송: 스트리머(소유자)가 휴대폰으로 시작해서 종료할 때까지 이어지는 실시간 송출 한 번.
  * 영상은 저장하지 않고 기록(제목·시각·상태)과 댓글만 남깁니다.
+ * 종료는 BroadcastRepository#endIfLive 조건부 갱신으로만 일어나며 되돌릴 수 없습니다.
+ * 제목 수정 등이 읽어 둔 이전 상태(방송 중)로 종료를 덮어쓰지 않도록 바뀐 컬럼만 갱신합니다.
  */
 @Entity
+@DynamicUpdate
 @Table(name = "live_broadcasts")
 public class Broadcast {
 
@@ -55,14 +60,6 @@ public class Broadcast {
         this.title = title;
         this.startedAt = startedAt;
         this.status = Status.LIVE;
-    }
-
-    /** 종료는 한 번만 일어나며 되돌릴 수 없습니다. 이미 종료됐으면 false. */
-    public boolean end(Instant at) {
-        if (status == Status.ENDED) return false;
-        status = Status.ENDED;
-        endedAt = at;
-        return true;
     }
 
     public void rename(String title) {

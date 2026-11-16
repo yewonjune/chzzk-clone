@@ -22,9 +22,13 @@ public interface BroadcastRepository extends JpaRepository<Broadcast, Long> {
     @EntityGraph(attributePaths = "owner")
     Optional<Broadcast> findWithOwnerById(Long id);
 
-    /** 서버 재시작 시: 송출 연결이 모두 사라졌으므로 방송 중인 방송을 일괄 종료합니다. */
-    @Modifying
+    /**
+     * 방송 중일 때만 종료로 바꾸는 조건부 갱신. 같은 방송을 여러 곳에서 동시에 종료해도 1을 받는 쪽은 하나뿐이고,
+     * 그쪽만 종료 알림을 보냅니다. (영속성 컨텍스트에 남은 이전 상태로 덮어쓰지 않도록 비웁니다.)
+     * @return 실제로 종료로 바꿨으면 1, 이미 종료였거나 없으면 0
+     */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("update Broadcast b set b.status = com.chichijik.broadcast.Broadcast.Status.ENDED, b.endedAt = :at "
-            + "where b.status = com.chichijik.broadcast.Broadcast.Status.LIVE")
-    int endAllLive(@Param("at") Instant at);
+            + "where b.id = :id and b.status = com.chichijik.broadcast.Broadcast.Status.LIVE")
+    int endIfLive(@Param("id") long id, @Param("at") Instant at);
 }
