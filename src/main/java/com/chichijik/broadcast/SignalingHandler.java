@@ -6,8 +6,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.event.ContextClosedEvent;
-import org.springframework.context.event.EventListener;
+import org.springframework.context.SmartLifecycle;
 import org.springframework.security.core.Authentication;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.CloseStatus;
@@ -33,7 +32,7 @@ import tools.jackson.databind.json.JsonMapper;
  * 송출자 연결이 끊겨도 방송을 바로 종료하지 않습니다(재연결 유예). 서버가 내려갈 때는 열린 연결을 4001로 닫습니다.
  */
 @Component
-public class SignalingHandler extends TextWebSocketHandler {
+public class SignalingHandler extends TextWebSocketHandler implements SmartLifecycle {
 
     private static final JsonMapper JSON = JsonMapper.builder().build();
     private static final String ATTR_ID = "broadcastId";
@@ -45,6 +44,7 @@ public class SignalingHandler extends TextWebSocketHandler {
 
     /** 이 서버에 열려 있는 시그널링 연결 (서버 종료 시 4001로 닫기 위해) */
     private final Set<WebSocketSession> open = ConcurrentHashMap.newKeySet();
+    private volatile boolean running;
 
     private final BroadcastService service;
     private final BroadcastLiveState liveState;
@@ -62,6 +62,10 @@ public class SignalingHandler extends TextWebSocketHandler {
         Long id = parseId(session);
         if (id == null) {
             WebSockets.closeQuietly(session, CloseStatus.BAD_DATA);
+            return;
+        }
+        if (!running) { // 종료 중인 서버: 다른 서버로 다시 연결하라고 알림
+            WebSockets.closeQuietly(session, RECONNECT_ELSEWHERE);
             return;
         }
         session.getAttributes().put(ATTR_ID, id);
@@ -161,13 +165,38 @@ public class SignalingHandler extends TextWebSocketHandler {
         }
     }
 
+    // ---- 서버 종료: graceful shutdown 의 한 단계로 열린 연결을 4001로 닫음 ----
+
     /**
-     * 서버 종료 신호를 받으면(웹 서버가 멈추기 전) 열린 연결을 모두 4001로 닫습니다.
-     * 송출자·시청자 기록은 끊김으로 남아 재연결 유예를 받습니다(방송을 종료하지 않음).
+     * 종료 단계 순서: 단계 값이 큰 것부터 멈춥니다(DEFAULT_PHASE 는 Integer.MAX_VALUE).
+     * 웹 서버의 graceful shutdown(DEFAULT_PHASE - 1024, server.shutdown=graceful)보다 먼저 멈춰 클라이언트가 바로 재연결하게 하고,
+     * Redis 연결 팩토리(단계 0)보다 먼저라서 연결을 닫을 때 송출자·시청자 기록을 Redis 에 "끊김"으로 남길 수 있습니다.
      */
-    @EventListener(ContextClosedEvent.class)
-    public void closeAllForShutdown() {
+    static final int SHUTDOWN_PHASE = SmartLifecycle.DEFAULT_PHASE - 512;
+
+    @Override
+    public void start() {
+        running = true;
+    }
+
+    /**
+     * 열린 연결을 모두 4001("다른 서버로 재연결")로 닫습니다. 이후 새로 열리는 연결도 바로 4001로 닫습니다
+     * (로드밸런서가 아직 이 서버로 보낸 재연결). 송출자·시청자 기록은 끊김으로 남아 재연결 유예를 받습니다(방송을 종료하지 않음).
+     */
+    @Override
+    public void stop() {
+        running = false;
         for (WebSocketSession s : List.copyOf(open)) WebSockets.closeQuietly(s, RECONNECT_ELSEWHERE);
+    }
+
+    @Override
+    public boolean isRunning() {
+        return running;
+    }
+
+    @Override
+    public int getPhase() {
+        return SHUTDOWN_PHASE;
     }
 
     /** 정상 종료(페이지를 떠남·화면이 닫음)면 퇴장. 비정상 종료나 서버 종료(4001)면 재연결을 기다립니다. */

@@ -142,7 +142,8 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
     private final String instanceId = UUID.randomUUID().toString();
     private final Map<Long, Local> locals = new ConcurrentHashMap<>();
     /**
-     * 종료 중: Redis 연결이 먼저 닫히고 WebSocket 이 나중에 닫히므로 연결 종료 처리에서 Redis 를 건드리지 않습니다.
+     * 종료 중: 열린 WebSocket 은 그보다 앞선 종료 단계에서 4001로 닫히지만(SignalingHandler), 그 뒤에 늦게 닫히는 연결이
+     * 이미 닫힌 Redis 를 건드리지 않도록 막습니다.
      * 이 인스턴스 소속으로 남은 기록은 하트비트가 사라진 인스턴스의 정리 작업이 지웁니다.
      */
     private volatile boolean stopping;
