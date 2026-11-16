@@ -47,6 +47,7 @@ import tools.jackson.databind.json.JsonMapper;
  *                                      끊기면 기록을 지우지 않고 token 을 빼고 disconnectedAt 을 남김(재연결 유예 판단용)
  *   chichijik:live:{id}:viewers  hash  viewerId → 시청자 연결을 든 인스턴스 id
  *   chichijik:live:{id}:viewers-disconnected  hash  viewerId → 끊긴 시각(epoch ms). 재연결 유예 중인 시청자
+ *   chichijik:live:{id}:ended    문자열  종료 표시 (TTL {@link #ENDED_MARKER_TTL}). 있으면 입장·송출자 연결을 받지 않음
  *   chichijik:live:{id}          채널  봉투(JSON) {"k":대상, ...}
  *     k=host   {m}      송출자에게 m 전달
  *     k=viewer {v, m}   시청자 v 에게 m 전달
@@ -69,13 +70,19 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
     private static final Logger log = LoggerFactory.getLogger(RedisBroadcastLiveState.class);
     private static final JsonMapper JSON = JsonMapper.builder().build();
     static final String PREFIX = "chichijik:live:";
+    /**
+     * 종료 표시를 남겨 두는 시간. 종료와 겹친 입장(방송 중인지 확인한 뒤 Redis 에 닿기 전)만 막으면 되므로 넉넉히 한 시간.
+     * 그 뒤에는 표시도 사라져 종료된 방송의 기록은 하나도 남지 않습니다.
+     */
+    static final Duration ENDED_MARKER_TTL = Duration.ofHours(1);
 
     /**
-     * KEYS[1]=viewers, KEYS[2]=viewers-disconnected,
+     * KEYS[1]=viewers, KEYS[2]=viewers-disconnected, KEYS[3]=ended,
      * ARGV: 상한, viewerId, 인스턴스 id, 채널, viewer-joined 봉투, 처음부터 다시 입장하는 시청자의 이전 viewerId(없으면 ""),
-     *       그 viewer-left 봉투 → 1 이면 입장, 0 이면 FULL. 이전 자리는 상한 검사 전에 비움
+     *       그 viewer-left 봉투 → 1 이면 입장, 0 이면 FULL, -1 이면 이미 종료된 방송. 이전 자리는 상한 검사 전에 비움
      */
     private static final RedisScript<Long> JOIN = RedisScript.of("""
+            if redis.call('EXISTS', KEYS[3]) == 1 then return -1 end
             if ARGV[6] ~= '' and redis.call('HDEL', KEYS[1], ARGV[6]) == 1 then
               redis.call('HDEL', KEYS[2], ARGV[6])
               redis.call('PUBLISH', ARGV[4], ARGV[7])
@@ -102,6 +109,17 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
             redis.call('HDEL', KEYS[2], ARGV[1])
             redis.call('PUBLISH', ARGV[2], ARGV[3])
             redis.call('PUBLISH', ARGV[2], '{"k":"all","m":{"type":"viewers","count":' .. redis.call('HLEN', KEYS[1]) .. '}}')
+            return 1
+            """, Long.class);
+
+    /**
+     * KEYS[1]=ended, KEYS[2..]=이 방송의 나머지 기록, ARGV: 종료 표시 TTL(ms), 채널, ended 봉투
+     * → 종료 표시를 남기고 기록을 지운 뒤 종료를 알림. 이후의 JOIN·ATTACH_HOST 는 종료 표시를 보고 기록을 다시 만들지 않음
+     */
+    private static final RedisScript<Long> END = RedisScript.of("""
+            redis.call('SET', KEYS[1], '1', 'PX', ARGV[1])
+            for i = 2, #KEYS do redis.call('DEL', KEYS[i]) end
+            redis.call('PUBLISH', ARGV[2], ARGV[3])
             return 1
             """, Long.class);
 
@@ -142,8 +160,9 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
             return 1
             """, Long.class);
 
-    /** KEYS[1]=host, ARGV: instance, token → 송출자로 기록하고 끊긴 시각을 지움 */
+    /** KEYS[1]=host, KEYS[2]=ended, ARGV: instance, token → 송출자로 기록하고 끊긴 시각을 지움. 이미 종료된 방송이면 0 */
     private static final RedisScript<Long> ATTACH_HOST = RedisScript.of("""
+            if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
             redis.call('HDEL', KEYS[1], 'disconnectedAt')
             redis.call('HSET', KEYS[1], 'instance', ARGV[1], 'token', ARGV[2])
             return 1
@@ -253,6 +272,10 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
         return PREFIX + id + ":viewers-disconnected";
     }
 
+    private static String endedKey(long id) {
+        return PREFIX + id + ":ended";
+    }
+
     private Local local(long id) {
         return locals.computeIfAbsent(id, k -> new Local());
     }
@@ -260,7 +283,7 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
     // ---- 상태 변경 ----
 
     @Override
-    public void attachHost(long id, WebSocketSession host) {
+    public boolean attachHost(long id, WebSocketSession host) {
         String token = UUID.randomUUID().toString();
         Local l = local(id);
         WebSocketSession previous;
@@ -269,13 +292,24 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
             l.host = host;
             l.hostToken = token;
         }
+        Long attached = redis.execute(ATTACH_HOST, List.of(hostKey(id), endedKey(id)), instanceId, token);
+        if (attached == null || attached != 1) {
+            synchronized (l) {
+                if (l.host == host) {
+                    l.host = null;
+                    l.hostToken = null;
+                }
+            }
+            forgetIfEmpty(id, l);
+            return false;
+        }
         if (previous != null && previous != host && previous.isOpen()) closeReplaced(previous);
-        redis.execute(ATTACH_HOST, List.of(hostKey(id)), instanceId, token);
         publish(id, Map.of("k", "host-attached", "t", token));
         for (Object viewerId : redis.opsForHash().keys(viewersKey(id))) {
             WebSockets.send(host, Map.of("type", "viewer-joined", "viewerId", viewerId));
         }
         publish(id, Map.of("k", "all", "m", Map.of("type", "viewers", "count", viewerCount(id))));
+        return true;
     }
 
     @Override
@@ -285,7 +319,7 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
             l.viewers.put(viewerId, viewer); // 먼저 등록해야 자기 입장으로 바뀐 시청자 수를 받음
         }
         String previous = startingOver == null ? "" : startingOver;
-        Long ok = redis.execute(JOIN, List.of(viewersKey(id), disconnectedViewersKey(id)), String.valueOf(maxViewers),
+        Long ok = redis.execute(JOIN, List.of(viewersKey(id), disconnectedViewersKey(id), endedKey(id)), String.valueOf(maxViewers),
                 viewerId, instanceId, channel(id),
                 envelope(Map.of("k", "host", "m", Map.of("type", "viewer-joined", "viewerId", viewerId))), previous,
                 envelope(Map.of("k", "host", "m", Map.of("type", "viewer-left", "viewerId", previous))));
@@ -293,7 +327,18 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
         synchronized (l) {
             l.viewers.remove(viewerId);
         }
+        if (ok != null && ok == -1) {
+            forgetIfEmpty(id, l);
+            return JoinResult.ENDED;
+        }
         return JoinResult.FULL;
+    }
+
+    /** 종료된 방송에 붙으려다 거절된 뒤 남은 빈 연결 묶음을 지움 (종료 알림을 이미 지나쳐 다시 지워질 일이 없음) */
+    private void forgetIfEmpty(long id, Local l) {
+        synchronized (l) {
+            if (l.host == null && l.viewers.isEmpty()) locals.remove(id, l);
+        }
     }
 
     @Override
@@ -432,8 +477,8 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
 
     @Override
     public void ended(long id) {
-        redis.delete(List.of(hostKey(id), viewersKey(id), disconnectedViewersKey(id)));
-        publish(id, Map.of("k", "ended"));
+        redis.execute(END, List.of(endedKey(id), hostKey(id), viewersKey(id), disconnectedViewersKey(id)),
+                String.valueOf(ENDED_MARKER_TTL.toMillis()), channel(id), envelope(Map.of("k", "ended")));
     }
 
     // ---- 조회 ----

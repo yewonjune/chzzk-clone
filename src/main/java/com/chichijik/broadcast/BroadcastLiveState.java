@@ -26,13 +26,15 @@ import org.springframework.web.socket.WebSocketSession;
  */
 public interface BroadcastLiveState {
 
-    enum JoinResult { OK, FULL }
+    /** 입장 결과. ENDED 는 입장을 처리하는 사이 방송이 종료된 경우 (종료 뒤에는 누구도 다시 붙지 못함) */
+    enum JoinResult { OK, FULL, ENDED }
 
     /**
      * 송출자 연결. 이미 연결된 송출자가 있으면 이전 연결을 끊고 교체합니다. 끊긴 기록이 있으면 지웁니다(같은 방송이 이어짐).
      * 집합에 있는 시청자를 송출자에게 viewer-joined 로 알려 줍니다(재연결한 송출 화면은 P2P 가 살아 있는 시청자는 그대로 둠).
+     * 그사이 방송이 종료됐으면 붙지 않고 false.
      */
-    void attachHost(long broadcastId, WebSocketSession host);
+    boolean attachHost(long broadcastId, WebSocketSession host);
 
     /**
      * 새 시청자 연결. 시청자 수가 상한에 이르렀으면 FULL 이고 연결을 추가하지 않습니다.
@@ -95,6 +97,7 @@ public interface BroadcastLiveState {
 
     /**
      * 방송이 종료됐음을 알립니다: 송출자·시청자에게 ended 를 보내고 연결을 모두 닫고 기록을 지웁니다.
+     * 이후 이 방송에는 송출자·시청자가 붙지 못합니다(종료와 겹친 입장도 ENDED). 종료된 방송의 기록은 계속 남지 않습니다.
      * 종료로 실제로 바꾼 쪽(방송 중 → 종료 조건부 갱신에 성공한 쪽)만 호출하므로 방송마다 한 번만 불립니다.
      */
     void ended(long broadcastId);

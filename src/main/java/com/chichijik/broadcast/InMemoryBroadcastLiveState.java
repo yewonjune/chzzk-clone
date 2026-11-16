@@ -6,6 +6,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.springframework.context.annotation.Profile;
@@ -23,6 +24,8 @@ import org.springframework.web.socket.WebSocketSession;
 public class InMemoryBroadcastLiveState implements BroadcastLiveState {
 
     private final Map<Long, Room> rooms = new ConcurrentHashMap<>();
+    /** 이 서버가 떠 있는 동안 종료된 방송 (종료와 겹친 입장이 방을 다시 만들지 않도록). 재시작하면 비지만 그때는 DB 가 종료를 막음 */
+    private final Set<Long> ended = ConcurrentHashMap.newKeySet();
 
     static final class Room {
         /** 지금 연결된 송출자 (없으면 null) */
@@ -30,6 +33,8 @@ public class InMemoryBroadcastLiveState implements BroadcastLiveState {
         /** 송출자 연결이 끊긴 시각 (연결 중이거나 한 번도 연결된 적이 없으면 null) */
         Instant hostDisconnectedAt;
         final Map<String, Viewer> viewers = new LinkedHashMap<>();
+        /** 방송이 종료되어 더는 아무도 붙지 못함 (종료 직전에 방을 받아 간 입장이 늦게 붙지 않도록) */
+        boolean closed;
     }
 
     /** 시청자 집합의 한 자리. 연결이 끊겨 유예 중이면 session 이 null 이고 disconnectedAt 이 있음 */
@@ -42,16 +47,19 @@ public class InMemoryBroadcastLiveState implements BroadcastLiveState {
         }
     }
 
+    /** 방송 중인 방송의 방 (없으면 만듦). 이미 종료된 방송이면 null */
     private Room room(long id) {
-        return rooms.computeIfAbsent(id, k -> new Room());
+        return rooms.compute(id, (k, r) -> r != null ? r : ended.contains(id) ? null : new Room());
     }
 
     @Override
-    public void attachHost(long id, WebSocketSession host) {
+    public boolean attachHost(long id, WebSocketSession host) {
         Room r = room(id);
+        if (r == null) return false;
         WebSocketSession previous;
         List<String> present;
         synchronized (r) {
+            if (r.closed) return false;
             previous = r.host;
             r.host = host;
             r.hostDisconnectedAt = null;
@@ -63,15 +71,18 @@ public class InMemoryBroadcastLiveState implements BroadcastLiveState {
         }
         for (String viewerId : present) WebSockets.send(host, Map.of("type", "viewer-joined", "viewerId", viewerId));
         broadcastViewerCount(id);
+        return true;
     }
 
     @Override
     public JoinResult attachViewer(long id, String viewerId, WebSocketSession viewer, int maxViewers, String startingOver) {
         Room r = room(id);
+        if (r == null) return JoinResult.ENDED;
         WebSocketSession host;
         boolean released;
         boolean full;
         synchronized (r) {
+            if (r.closed) return JoinResult.ENDED;
             released = startingOver != null && r.viewers.remove(startingOver) != null;
             full = r.viewers.size() >= maxViewers;
             if (!full) r.viewers.put(viewerId, new Viewer(viewer));
@@ -125,6 +136,7 @@ public class InMemoryBroadcastLiveState implements BroadcastLiveState {
     @Override
     public void recoverAfterRestart(long id, Instant at) {
         Room r = room(id);
+        if (r == null) return;
         synchronized (r) {
             if (r.host == null && r.hostDisconnectedAt == null) r.hostDisconnectedAt = at;
         }
@@ -213,10 +225,12 @@ public class InMemoryBroadcastLiveState implements BroadcastLiveState {
     /** 방송 종료: 송출자·시청자에게 ended 를 보내고 모든 연결을 닫은 뒤 기록을 없앱니다. */
     @Override
     public void ended(long id) {
+        ended.add(id);
         Room r = rooms.remove(id);
         if (r == null) return;
         List<WebSocketSession> targets;
         synchronized (r) {
+            r.closed = true;
             targets = connected(r);
             r.viewers.clear();
             r.host = null;

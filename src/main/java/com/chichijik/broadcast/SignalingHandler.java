@@ -117,13 +117,15 @@ public class SignalingHandler extends TextWebSocketHandler implements SmartLifec
                 return;
             }
             raw.getAttributes().put(ATTR_ROLE, "host");
-            liveState.attachHost(id, session);
+            if (!liveState.attachHost(id, session)) { // 확인한 뒤 붙기 전에 종료됨
+                raw.getAttributes().remove(ATTR_ROLE);
+                sendEnded(raw, session);
+            }
             return;
         }
 
         if (!service.isLive(id)) {
-            WebSockets.send(session, Map.of("type", "ended"));
-            WebSockets.closeQuietly(raw, CloseStatus.NORMAL);
+            sendEnded(raw, session);
             return;
         }
         // 재연결: 이전 viewerId 가 아직 시청자 집합에 있으면 같은 시청자로 이어 붙음 (시청자 수·송출자 알림 없음)
@@ -145,14 +147,24 @@ public class SignalingHandler extends TextWebSocketHandler implements SmartLifec
         raw.getAttributes().put(ATTR_ROLE, "viewer");
         raw.getAttributes().put(ATTR_VIEWER_ID, viewerId);
         String startingOver = startOver ? previousId : null;
-        if (liveState.attachViewer(id, viewerId, session, maxViewers, startingOver) == BroadcastLiveState.JoinResult.FULL) {
+        BroadcastLiveState.JoinResult result = liveState.attachViewer(id, viewerId, session, maxViewers, startingOver);
+        if (result != BroadcastLiveState.JoinResult.OK) {
             raw.getAttributes().remove(ATTR_ROLE);
             raw.getAttributes().remove(ATTR_VIEWER_ID);
-            WebSockets.send(session, Map.of("type", "full", "max", maxViewers));
-            WebSockets.closeQuietly(raw, CloseStatus.NORMAL);
+            if (result == BroadcastLiveState.JoinResult.ENDED) {
+                sendEnded(raw, session); // 방송 중인지 확인한 뒤 붙기 전에 종료됨
+            } else {
+                WebSockets.send(session, Map.of("type", "full", "max", maxViewers));
+                WebSockets.closeQuietly(raw, CloseStatus.NORMAL);
+            }
             return;
         }
         WebSockets.send(session, Map.of("type", "joined", "viewerId", viewerId, "resumed", false));
+    }
+
+    private static void sendEnded(WebSocketSession raw, WebSocketSession session) {
+        WebSockets.send(session, Map.of("type", "ended"));
+        WebSockets.closeQuietly(raw, CloseStatus.NORMAL);
     }
 
     @Override

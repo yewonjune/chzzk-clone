@@ -181,6 +181,69 @@ class ClusterBroadcastTest {
     }
 
     @Test
+    void 종료와_동시에_들어오는_시청자도_연결이_닫히고_종료된_방송의_기록은_남지_않는다() throws Exception {
+        int racers = 6;
+        ExecutorService pool = Executors.newFixedThreadPool(racers);
+        try {
+            for (int round = 0; round < 10; round++) {
+                Live live = liveOnA();
+                // 시청자들이 종료 전후로 계속 입장을 시도: 입장한 연결은 열어 둔 채, 종료되었다고 답할 때까지 다시 시도
+                List<Callable<List<Socket>>> joins = new ArrayList<>();
+                for (int i = 0; i < racers; i++) {
+                    String server = i % 2 == 0 ? cluster.a : cluster.b;
+                    joins.add(() -> {
+                        List<Socket> opened = new ArrayList<>();
+                        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+                        while (System.nanoTime() < deadline) {
+                            Socket v = viewer(server, live.id());
+                            opened.add(v);
+                            String reply = firstOf(v, "joined", "full", "ended");
+                            if ("ended".equals(reply)) break;
+                            if ("full".equals(reply)) v.awaitCloseCode();
+                        }
+                        return opened;
+                    });
+                }
+                List<Future<List<Socket>>> running = new ArrayList<>();
+                for (Callable<List<Socket>> j : joins) running.add(pool.submit(j));
+                Thread.sleep(150);
+                live.owner().on(cluster.b).post("/api/broadcasts/" + live.id() + "/end");
+
+                // 종료 전에 들어온 시청자는 종료 알림으로, 종료 뒤에 들어온 시청자는 바로 닫힘 (어느 쪽이든 열린 채 남지 않음)
+                for (Future<List<Socket>> f : running) {
+                    for (Socket v : f.get()) assertThat(v.awaitCloseCode()).as("round %d", round).isEqualTo(1000);
+                }
+                assertThat(liveKeysWithoutExpiry(live.id())).as("round %d", round).isEmpty();
+            }
+        } finally {
+            pool.shutdown();
+        }
+    }
+
+    /** 처음 받은 메시지 중 types 에 든 것 (그 외 메시지는 건너뜀) */
+    static String firstOf(Socket s, String... types) throws InterruptedException {
+        long deadline = System.nanoTime() + ApiClient.WAIT.toNanos();
+        while (System.nanoTime() < deadline) {
+            var m = s.inbox.poll(50, java.util.concurrent.TimeUnit.MILLISECONDS);
+            if (m != null && List.of(types).contains(m.get("type").asString())) return m.get("type").asString();
+        }
+        throw new AssertionError("응답을 받지 못함");
+    }
+
+    /** 이 방송의 Redis 기록 중 만료 시간이 없는 키 (종료된 방송이면 없어야 함) */
+    static List<String> liveKeysWithoutExpiry(long id) throws Exception {
+        String keys = cluster.redis.execInContainer("redis-cli", "--scan", "--pattern", "chichijik:live:" + id + ":*")
+                .getStdout();
+        List<String> result = new ArrayList<>();
+        for (String key : keys.split("\\R")) {
+            if (key.isBlank()) continue;
+            String ttl = cluster.redis.execInContainer("redis-cli", "TTL", key).getStdout().trim();
+            if ("-1".equals(ttl)) result.add(key);
+        }
+        return result;
+    }
+
+    @Test
     void 송출자가_A에서_끊기고_유예_안에_B로_다시_붙으면_방송이_이어지고_시청자는_종료_알림을_받지_않는다() throws Exception {
         Live live = liveOnA();
         Socket viewerOnB = viewer(cluster.b, live.id());
