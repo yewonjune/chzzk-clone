@@ -15,6 +15,7 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -180,6 +181,8 @@ final class ApiClient {
     static final class Socket implements WebSocket.Listener {
         WebSocket ws;
         final BlockingQueue<JsonNode> inbox = new LinkedBlockingQueue<>();
+        /** 서버가 연결을 닫을 때 보낸 종료 코드 */
+        final CompletableFuture<Integer> closeCode = new CompletableFuture<>();
         private final StringBuilder partial = new StringBuilder();
 
         void send(String text) {
@@ -197,6 +200,21 @@ final class ApiClient {
 
         void close() {
             ws.sendClose(WebSocket.NORMAL_CLOSURE, "bye").join();
+        }
+
+        /** 종료 핸드셰이크 없이 TCP 연결을 끊음 (네트워크가 끊긴 것처럼 비정상 종료) */
+        void drop() {
+            ws.abort();
+        }
+
+        int awaitCloseCode() throws Exception {
+            return closeCode.get(WAIT.toMillis(), TimeUnit.MILLISECONDS);
+        }
+
+        @Override
+        public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
+            closeCode.complete(statusCode);
+            return null;
         }
 
         @Override

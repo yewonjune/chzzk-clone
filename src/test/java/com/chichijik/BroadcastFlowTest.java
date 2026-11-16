@@ -23,16 +23,21 @@ import tools.jackson.databind.JsonNode;
 /**
  * 2단계 방송 기능 유지 + 3단계 소유자 송출 제어:
  * 시작 → 목록(방송 중) → 소유자만 송출자 연결 → 시그널링 → 시청자 상한 → 방송 중 댓글 실시간 전달
- * → 송출 끊김 시 즉시 종료 → 재시작 시 정리.
+ * → 송출이 끊겨도 재연결 유예 안에 돌아오면 이어짐, 유예가 지나면 종료 → 재시작해도 바로 종료하지 않음.
  */
 class BroadcastFlowTest {
+
+    /** 테스트에서는 재연결 유예와 정리 주기를 짧게 둡니다. */
+    static final long GRACE_MS = 2_000;
+    static final String GRACE = "--app.live.reconnect-grace=" + GRACE_MS + "ms";
+    static final String SWEEP = "--app.live.sweep-interval-ms=200";
 
     @TempDir
     Path dataDir;
 
     @Test
-    void 소유자만_송출_시그널링_댓글푸시_시청자상한_끊김시_종료() throws Exception {
-        try (var app = ApiClient.startServer(dataDir, "--app.live.max-viewers=1")) {
+    void 소유자만_송출_시그널링_댓글푸시_시청자상한_끊긴뒤_유예안에_돌아오면_이어지고_유예가_지나면_종료() throws Exception {
+        try (var app = ApiClient.startServer(dataDir, "--app.live.max-viewers=1", GRACE, SWEEP)) {
             String base = ApiClient.baseUrl(app);
             ApiClient owner = ApiClient.signUp(base, "streamer1", "스트리머");
             ApiClient other = ApiClient.signUp(base, "viewer01", "시청자");
@@ -92,9 +97,22 @@ class BroadcastFlowTest {
             // 방송 중에는 기록 삭제 불가 (409)
             assertThat(owner.delete("/api/broadcasts/" + id).statusCode()).isEqualTo(409);
 
-            // 송출자 연결이 끊기면 즉시 종료 → 시청자에게 ended
+            // 송출자 연결이 끊겨도 바로 종료되지 않음: 재연결 유예(테스트 2초) 안에 다시 붙으면 같은 방송이 이어짐
             host.close();
+            assertThat(json(guest.get("/api/broadcasts/" + id)).get("status").asString()).isEqualTo("live");
+            Socket hostAgain = owner.socket("/ws/broadcasts/" + id);
+            hostAgain.send("{\"type\":\"join\",\"role\":\"host\"}");
+            // 다시 붙은 송출자에게 지금 있는 시청자를 다시 알려 줌 (송출 화면은 이미 P2P 가 있으면 그대로 둠)
+            assertThat(hostAgain.next("viewer-joined").get("viewerId").asString()).isEqualTo(viewerId);
+            Thread.sleep(GRACE_MS + 1_000);
+            assertThat(json(guest.get("/api/broadcasts/" + id)).get("status").asString()).isEqualTo("live");
+            assertThat(viewer.inbox).noneMatch(m -> "ended".equals(m.get("type").asString()));
+
+            // 다시 끊기고 유예가 지나도록 돌아오지 않으면 종료 → 시청자·송출자 알림은 한 번
+            hostAgain.close();
             assertThat(viewer.next("ended")).isNotNull();
+            Thread.sleep(500);
+            assertThat(viewer.inbox).noneMatch(m -> "ended".equals(m.get("type").asString()));
             JsonNode ended = json(guest.get("/api/broadcasts/" + id));
             assertThat(ended.get("status").asString()).isEqualTo("ended");
             assertThat(ended.get("endedAt").isNull()).isFalse();
@@ -113,27 +131,113 @@ class BroadcastFlowTest {
     }
 
     @Test
-    void 소유자가_종료_그리고_재시작하면_방송중이_남지_않음() throws Exception {
-        long leftoverId;
+    void 재시작해도_방송중은_바로_종료되지_않고_송출이_돌아오면_이어지고_안돌아오면_유예뒤_종료() throws Exception {
+        long back, gone;
+        Socket oldHost, oldViewer;
         try (var app = ApiClient.startServer(dataDir)) {
             String base = ApiClient.baseUrl(app);
             ApiClient owner = ApiClient.signUp(base, "streamer2", "방송인");
             ApiClient other = ApiClient.signUp(base, "someone", "다른사람");
 
+            // 소유자만 종료 가능
             long a = json(owner.postJson("/api/broadcasts", "{\"title\":\"A\"}")).get("id").asLong();
             assertThat(other.post("/api/broadcasts/" + a + "/end").statusCode()).isEqualTo(403);
             var end = owner.post("/api/broadcasts/" + a + "/end");
             assertThat(end.statusCode()).isEqualTo(200);
             assertThat(json(end).get("status").asString()).isEqualTo("ended");
 
-            leftoverId = json(owner.postJson("/api/broadcasts", "{\"title\":\"B\"}")).get("id").asLong();
+            back = json(owner.postJson("/api/broadcasts", "{\"title\":\"돌아올 방송\"}")).get("id").asLong();
+            gone = json(owner.postJson("/api/broadcasts", "{\"title\":\"안 돌아올 방송\"}")).get("id").asLong();
+            oldHost = owner.socket("/ws/broadcasts/" + back);
+            oldHost.send("{\"type\":\"join\",\"role\":\"host\"}");
+            owner.socket("/ws/broadcasts/" + gone).send("{\"type\":\"join\",\"role\":\"host\"}");
+            oldViewer = other.socket("/ws/broadcasts/" + back);
+            oldViewer.send("{\"type\":\"join\",\"role\":\"viewer\"}");
+            oldHost.next("viewer-joined");
         }
-        try (var app = ApiClient.startServer(dataDir)) { // 재시작: 송출 연결이 사라졌으므로 B도 종료
-            ApiClient guest = ApiClient.anonymous(ApiClient.baseUrl(app));
-            JsonNode list = json(guest.get("/api/broadcasts"));
-            assertThat(list.size()).isEqualTo(2);
-            for (JsonNode n : list) assertThat(n.get("status").asString()).isEqualTo("ended");
-            assertThat(json(guest.get("/api/broadcasts/" + leftoverId)).get("streamer").asString()).isEqualTo("방송인");
+        // 서버가 내려가면 열린 연결을 4001("다른 서버로 재연결")로 닫음
+        assertThat(oldHost.awaitCloseCode()).isEqualTo(4001);
+        assertThat(oldViewer.awaitCloseCode()).isEqualTo(4001);
+        assertThat(oldViewer.inbox).noneMatch(m -> "ended".equals(m.get("type").asString()));
+
+        try (var app = ApiClient.startServer(dataDir, GRACE, SWEEP)) { // 재시작: 송출 연결은 사라졌지만 바로 종료하지 않음
+            String base = ApiClient.baseUrl(app);
+            ApiClient guest = ApiClient.anonymous(base);
+            assertThat(json(guest.get("/api/broadcasts/" + back)).get("status").asString()).isEqualTo("live");
+            assertThat(json(guest.get("/api/broadcasts/" + gone)).get("status").asString()).isEqualTo("live");
+            assertThat(json(guest.get("/api/broadcasts/" + back)).get("streamer").asString()).isEqualTo("방송인");
+
+            // 송출 화면이 다시 붙음 (기본 프로필은 세션이 메모리에 있어 재시작 뒤 다시 로그인)
+            ApiClient owner2 = ApiClient.anonymous(base);
+            owner2.applySession(json(owner2.postJson("/api/auth/login", "{\"username\":\"streamer2\",\"password\":\"password123\"}")));
+            Socket host = owner2.socket("/ws/broadcasts/" + back);
+            host.send("{\"type\":\"join\",\"role\":\"host\"}");
+            Socket viewer = guest.socket("/ws/broadcasts/" + back);
+            viewer.send("{\"type\":\"join\",\"role\":\"viewer\"}");
+            host.next("viewer-joined");
+
+            Thread.sleep(GRACE_MS + 1_000);
+            assertThat(json(guest.get("/api/broadcasts/" + back)).get("status").asString()).isEqualTo("live");
+            assertThat(json(guest.get("/api/broadcasts/" + gone)).get("status").asString()).isEqualTo("ended");
+            assertThat(viewer.inbox).noneMatch(m -> "ended".equals(m.get("type").asString()));
+        }
+    }
+
+    @Test
+    void 시청자는_이전_viewerId로_재연결하면_같은_시청자로_이어지고_유예안에_안돌아오면_퇴장() throws Exception {
+        try (var app = ApiClient.startServer(dataDir, GRACE, SWEEP)) {
+            String base = ApiClient.baseUrl(app);
+            ApiClient owner = ApiClient.signUp(base, "streamer4", "이어보기");
+            ApiClient guest = ApiClient.anonymous(base);
+            long id = json(owner.postJson("/api/broadcasts", "{\"title\":\"재연결\"}")).get("id").asLong();
+            Socket host = owner.socket("/ws/broadcasts/" + id);
+            host.send("{\"type\":\"join\",\"role\":\"host\"}");
+
+            // 입장하면 서버가 viewerId 를 내려줌
+            Socket viewer = guest.socket("/ws/broadcasts/" + id);
+            viewer.send("{\"type\":\"join\",\"role\":\"viewer\"}");
+            JsonNode joined = viewer.next("joined");
+            String viewerId = joined.get("viewerId").asString();
+            assertThat(joined.get("resumed").asBoolean()).isFalse();
+            assertThat(host.next("viewer-joined").get("viewerId").asString()).isEqualTo(viewerId);
+            assertThat(host.next("viewers").get("count").asInt()).isEqualTo(1);
+
+            // 시그널링 연결만 비정상으로 끊김 → 같은 viewerId 로 다시 붙음: 시청자 수 그대로, 송출자에게 새 입장 알림 없음
+            viewer.drop();
+            Socket resumed = guest.socket("/ws/broadcasts/" + id);
+            resumed.send("{\"type\":\"join\",\"role\":\"viewer\",\"viewerId\":\"" + viewerId + "\"}");
+            JsonNode again = resumed.next("joined");
+            assertThat(again.get("viewerId").asString()).isEqualTo(viewerId);
+            assertThat(again.get("resumed").asBoolean()).isTrue();
+            assertThat(resumed.next("viewers").get("count").asInt()).isEqualTo(1);
+            assertThat(json(guest.get("/api/broadcasts/" + id)).get("viewerCount").asInt()).isEqualTo(1);
+
+            // 이어 붙은 연결로 시그널이 오감
+            host.send("{\"type\":\"signal\",\"to\":\"" + viewerId + "\",\"data\":{\"candidate\":\"c1\"}}");
+            assertThat(resumed.next("signal").get("data").get("candidate").asString()).isEqualTo("c1");
+            resumed.send("{\"type\":\"signal\",\"data\":{\"candidate\":\"c2\"}}");
+            assertThat(host.next("signal").get("from").asString()).isEqualTo(viewerId);
+            assertThat(host.inbox).noneMatch(m -> "viewer-joined".equals(m.get("type").asString()));
+
+            // 집합에 없는 viewerId 면 새 시청자로 입장
+            Socket stranger = guest.socket("/ws/broadcasts/" + id);
+            stranger.send("{\"type\":\"join\",\"role\":\"viewer\",\"viewerId\":\"no-such-viewer\"}");
+            JsonNode fresh = stranger.next("joined");
+            assertThat(fresh.get("resumed").asBoolean()).isFalse();
+            String strangerId = fresh.get("viewerId").asString();
+            assertThat(strangerId).isNotEqualTo("no-such-viewer");
+            assertThat(host.next("viewer-joined").get("viewerId").asString()).isEqualTo(strangerId);
+
+            // 비정상으로 끊긴 뒤 유예 안에 돌아오지 않으면 퇴장 → 송출자에게 viewer-left
+            stranger.drop();
+            assertThat(json(guest.get("/api/broadcasts/" + id)).get("viewerCount").asInt()).isEqualTo(2);
+            Thread.sleep(GRACE_MS);
+            assertThat(host.next("viewer-left").get("viewerId").asString()).isEqualTo(strangerId);
+            assertThat(json(guest.get("/api/broadcasts/" + id)).get("viewerCount").asInt()).isEqualTo(1);
+
+            // 정상 종료(페이지를 떠남)는 바로 퇴장
+            resumed.close();
+            assertThat(host.next("viewer-left").get("viewerId").asString()).isEqualTo(viewerId);
         }
     }
 
