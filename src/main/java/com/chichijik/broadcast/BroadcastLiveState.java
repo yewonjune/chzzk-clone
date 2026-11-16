@@ -70,6 +70,13 @@ public interface BroadcastLiveState {
     /** 연결이 끊긴 시각이 cutoff 이전인 시청자를 퇴장 처리합니다 (재연결 유예가 지난 시청자). */
     void dropViewersDisconnectedBefore(long broadcastId, Instant cutoff);
 
+    /**
+     * 하트비트가 사라진 서버(강제 종료 등) 소속 기록 정리. 그 서버에 연결된 것으로 남은 시청자는 퇴장 처리하고(시청자 수·상한 회복),
+     * 송출자 기록은 지금 끊긴 것으로 바꿔 재연결 유예 판단으로 넘깁니다. 이미 끊김으로 기록된 시청자는 재연결 유예가 판단합니다.
+     * 여러 서버에서 동시에 돌아도 결과는 한 번 처리한 것과 같습니다. 서버가 하나뿐인 구현에서는 할 일이 없습니다.
+     */
+    void releaseDeadInstances(long broadcastId);
+
     /** 송출자 → 시청자 한 명에게 시그널 전달 */
     void relayToViewer(long broadcastId, String viewerId, Object data);
 

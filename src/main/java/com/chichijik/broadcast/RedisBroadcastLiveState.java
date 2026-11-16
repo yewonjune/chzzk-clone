@@ -1,8 +1,10 @@
 package com.chichijik.broadcast;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -11,9 +13,12 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Profile;
 import org.springframework.data.redis.connection.Message;
 import org.springframework.data.redis.connection.MessageListener;
@@ -48,6 +53,11 @@ import tools.jackson.databind.json.JsonMapper;
  *     k=all    {m}      송출자·시청자 모두에게 m 전달 (시청자 수, 댓글, 후원, 제목)
  *     k=host-attached {t}  새 송출자 연결(t)이 붙음 → 다른 인스턴스가 든 이전 송출자 연결을 닫음
  *     k=ended            종료 알림을 보내고 이 방송의 연결을 모두 닫음
+ *
+ *   chichijik:instance:{인스턴스 id}  문자열  하트비트. 인스턴스가 살아 있는 동안 주기적으로 TTL 과 함께 갱신
+ *
+ * 하트비트가 사라진 인스턴스(강제 종료 등) 소속 기록은 정리 작업({@link #releaseDeadInstances})이 정리합니다.
+ * 정상 종료하는 인스턴스는 그 전에 연결을 4001로 닫으면서 기록을 "끊김"으로 남기므로, 그 기록은 재연결 유예가 판단합니다.
  *
  * 시청자 입장·퇴장과 시청자 수 알림은 Lua 스크립트 하나로 처리합니다.
  * 상한 검사와 추가가 원자적이고, 시청자 수가 바뀐 순서대로 발행됩니다.
@@ -135,11 +145,37 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
             return 1
             """, Long.class);
 
+    /**
+     * KEYS[1]=viewers, KEYS[2]=viewers-disconnected, ARGV: viewerId, 죽은 인스턴스 id, 채널, viewer-left 봉투
+     * → 아직 그 인스턴스에 연결된 것으로 남은 시청자면 퇴장시키고 1. 그사이 다른 인스턴스로 이어 붙었거나
+     *   이미 끊김으로 기록된(재연결 유예 중인) 시청자는 그대로 두므로 여러 인스턴스가 동시에 돌아도 한 번만 퇴장
+     */
+    private static final RedisScript<Long> RELEASE_VIEWER = RedisScript.of("""
+            if redis.call('HGET', KEYS[1], ARGV[1]) ~= ARGV[2] then return 0 end
+            if redis.call('HEXISTS', KEYS[2], ARGV[1]) == 1 then return 0 end
+            redis.call('HDEL', KEYS[1], ARGV[1])
+            redis.call('PUBLISH', ARGV[3], ARGV[4])
+            redis.call('PUBLISH', ARGV[3], '{"k":"all","m":{"type":"viewers","count":' .. redis.call('HLEN', KEYS[1]) .. '}}')
+            return 1
+            """, Long.class);
+
+    /** KEYS[1]=host, ARGV: 죽은 인스턴스 id, 지금(ms) → 송출자가 아직 그 인스턴스 소속이면 지금 끊긴 것으로 바꾸고 1 */
+    private static final RedisScript<Long> RELEASE_HOST = RedisScript.of("""
+            if redis.call('HGET', KEYS[1], 'instance') ~= ARGV[1] then return 0 end
+            redis.call('HDEL', KEYS[1], 'token', 'instance')
+            redis.call('HSET', KEYS[1], 'disconnectedAt', ARGV[2])
+            return 1
+            """, Long.class);
+
     private final StringRedisTemplate redis;
     private final RedisMessageListenerContainer container;
     /** 채널 메시지를 받은 순서대로 전달 (offer 다음 ICE candidate 순서 유지) */
     private final ExecutorService dispatcher = Executors.newSingleThreadExecutor(r -> new Thread(r, "live-relay"));
     private final String instanceId = UUID.randomUUID().toString();
+    /** 하트비트 갱신 (정리 작업이 오래 걸려도 밀리지 않도록 스케줄러와 따로 둠) */
+    private final ScheduledExecutorService heartbeat =
+            Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "live-heartbeat"));
+    private final Duration heartbeatTtl;
     private final Map<Long, Local> locals = new ConcurrentHashMap<>();
     /**
      * 종료 중: 열린 WebSocket 은 그보다 앞선 종료 단계에서 4001로 닫히지만(SignalingHandler), 그 뒤에 늦게 닫히는 연결이
@@ -155,8 +191,15 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
         final Map<String, WebSocketSession> viewers = new LinkedHashMap<>();
     }
 
-    public RedisBroadcastLiveState(StringRedisTemplate redis, RedisConnectionFactory connectionFactory) {
+    public RedisBroadcastLiveState(StringRedisTemplate redis, RedisConnectionFactory connectionFactory,
+                                   @Value("${app.live.heartbeat-interval:5s}") Duration heartbeatInterval,
+                                   @Value("${app.live.heartbeat-ttl:15s}") Duration heartbeatTtl) {
         this.redis = redis;
+        this.heartbeatTtl = heartbeatTtl;
+        // 연결을 받기 전에 살아 있음을 먼저 알림 (다른 인스턴스가 이 인스턴스 소속 기록을 죽은 것으로 보지 않도록)
+        beat();
+        heartbeat.scheduleWithFixedDelay(this::beat, heartbeatInterval.toMillis(), heartbeatInterval.toMillis(),
+                TimeUnit.MILLISECONDS);
         this.container = new RedisMessageListenerContainer();
         container.setConnectionFactory(connectionFactory);
         container.setTaskExecutor(dispatcher);
@@ -165,11 +208,29 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
         container.start();
     }
 
+    /**
+     * 연결은 이보다 앞선 종료 단계에서 4001로 닫히며 기록이 "끊김"으로 남습니다(SignalingHandler). 그 뒤라서 하트비트를 멈춰도
+     * 정리 작업이 이 인스턴스의 연결 중 기록을 지우지 않고, 남은 기록은 재연결 유예가 판단합니다.
+     * 하트비트 키는 지우지 않고 TTL 로 사라지게 둡니다(이 시점에는 Redis 연결이 이미 닫혀 있음).
+     */
     @PreDestroy
     void stop() throws Exception {
+        heartbeat.shutdownNow();
         stopping = true;
         container.destroy();
         dispatcher.shutdown();
+    }
+
+    private static String heartbeatKey(String instance) {
+        return "chichijik:instance:" + instance;
+    }
+
+    private void beat() {
+        try {
+            redis.opsForValue().set(heartbeatKey(instanceId), "1", heartbeatTtl);
+        } catch (RuntimeException e) {
+            log.warn("하트비트 갱신 실패: {}", e.getMessage());
+        }
     }
 
     private static String channel(long id) {
@@ -279,6 +340,33 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
             redis.execute(DROP_DISCONNECTED, List.of(viewersKey(id), disconnectedViewersKey(id)), viewerId, cutoffMs,
                     channel(id), envelope(Map.of("k", "host", "m", Map.of("type", "viewer-left", "viewerId", viewerId))));
         }
+    }
+
+    /**
+     * 송출자·시청자 기록의 소속 인스턴스 중 하트비트가 없는 인스턴스의 기록을 정리합니다.
+     * 송출자의 끊긴 시각은 정리한 시각입니다(죽은 시각은 알 수 없으므로, 그때부터 재연결 유예를 줌).
+     */
+    @Override
+    public void releaseDeadInstances(long id) {
+        Map<Object, Object> viewers = redis.opsForHash().entries(viewersKey(id));
+        Object hostInstance = redis.opsForHash().get(hostKey(id), "instance");
+        Map<String, Boolean> alive = new HashMap<>();
+        alive.put(instanceId, true);
+        if (hostInstance != null && !isAlive(hostInstance.toString(), alive)) {
+            redis.execute(RELEASE_HOST, List.of(hostKey(id)), hostInstance.toString(),
+                    String.valueOf(System.currentTimeMillis()));
+        }
+        for (Map.Entry<Object, Object> e : viewers.entrySet()) {
+            String owner = e.getValue().toString();
+            if (isAlive(owner, alive)) continue;
+            String viewerId = e.getKey().toString();
+            redis.execute(RELEASE_VIEWER, List.of(viewersKey(id), disconnectedViewersKey(id)), viewerId, owner, channel(id),
+                    envelope(Map.of("k", "host", "m", Map.of("type", "viewer-left", "viewerId", viewerId))));
+        }
+    }
+
+    private boolean isAlive(String instance, Map<String, Boolean> known) {
+        return known.computeIfAbsent(instance, i -> Boolean.TRUE.equals(redis.hasKey(heartbeatKey(i))));
     }
 
     @Override

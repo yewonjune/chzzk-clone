@@ -215,7 +215,12 @@ final class ApiClient {
         }
 
         JsonNode next(String type) throws InterruptedException {
-            long deadline = System.nanoTime() + WAIT.toNanos();
+            return next(type, WAIT);
+        }
+
+        /** 최대 wait 동안 type 메시지를 기다림 (하트비트 TTL·재연결 유예처럼 기본 대기보다 오래 걸리는 경우) */
+        JsonNode next(String type, Duration wait) throws InterruptedException {
+            long deadline = System.nanoTime() + wait.toNanos();
             while (System.nanoTime() < deadline) {
                 JsonNode m = inbox.poll(50, TimeUnit.MILLISECONDS);
                 if (m != null && type.equals(m.get("type").asString())) return m;
@@ -225,7 +230,11 @@ final class ApiClient {
 
         /** type 이 같고 조건에 맞는 메시지가 올 때까지 기다림 (중간에 온 다른 값은 건너뜀) */
         JsonNode nextWhere(String type, Predicate<JsonNode> condition) throws InterruptedException {
-            long deadline = System.nanoTime() + WAIT.toNanos();
+            return nextWhere(type, condition, WAIT);
+        }
+
+        JsonNode nextWhere(String type, Predicate<JsonNode> condition, Duration wait) throws InterruptedException {
+            long deadline = System.nanoTime() + wait.toNanos();
             while (System.nanoTime() < deadline) {
                 JsonNode m = inbox.poll(50, TimeUnit.MILLISECONDS);
                 if (m != null && type.equals(m.get("type").asString()) && condition.test(m)) return m;

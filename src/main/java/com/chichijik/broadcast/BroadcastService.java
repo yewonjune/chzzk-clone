@@ -123,6 +123,7 @@ public class BroadcastService {
      * ① 시작 후 30초 동안 송출 연결이 한 번도 없었던 방송 (시작만 하고 바로 창을 닫는 등)
      * ② 송출 연결이 끊긴 지 재연결 유예가 지난 방송
      * 재연결 유예가 지난 끊긴 시청자도 퇴장 처리합니다.
+     * 그 전에 하트비트가 사라진 서버 소속 기록을 정리합니다(송출자는 끊김으로 바뀌어 ②의 유예를 받음).
      * 종료는 조건부 갱신이라 여러 곳에서 동시에 돌아도 종료 알림은 한 번만 나갑니다.
      */
     @Scheduled(fixedDelayString = "${app.live.sweep-interval-ms:10000}", initialDelayString = "${app.live.sweep-interval-ms:10000}")
@@ -134,6 +135,7 @@ public class BroadcastService {
         Instant graceCutoff = now.minus(reconnectGrace);
         for (Broadcast b : repository.findAllByStatusOrderByStartedAtDesc(Broadcast.Status.LIVE)) {
             long id = b.getId();
+            liveState.releaseDeadInstances(id);
             if (liveState.hasHost(id)) {
                 liveState.dropViewersDisconnectedBefore(id, graceCutoff);
                 continue;

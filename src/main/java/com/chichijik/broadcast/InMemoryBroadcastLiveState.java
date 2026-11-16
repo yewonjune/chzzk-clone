@@ -150,6 +150,11 @@ public class InMemoryBroadcastLiveState implements BroadcastLiveState {
         removeViewers(id, List.of(viewerId));
     }
 
+    /** 서버가 하나뿐이고 기록이 이 서버 메모리에 있으므로, 다른 서버가 죽어 남긴 기록은 없습니다. */
+    @Override
+    public void releaseDeadInstances(long id) {
+    }
+
     @Override
     public void dropViewersDisconnectedBefore(long id, Instant cutoff) {
         Room r = rooms.get(id);
