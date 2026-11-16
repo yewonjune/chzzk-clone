@@ -19,7 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.chichijik.broadcast.Broadcast;
 import com.chichijik.broadcast.BroadcastRepository;
-import com.chichijik.broadcast.LiveRooms;
+import com.chichijik.broadcast.BroadcastLiveState;
 import com.chichijik.common.AfterCommit;
 import com.chichijik.common.ApiException;
 import com.chichijik.common.Ownership;
@@ -75,16 +75,16 @@ public class DonationService {
     private final ReplayRepository replays;
     private final UserRepository users;
     private final PaymentGateway gateway;
-    private final LiveRooms rooms;
+    private final BroadcastLiveState liveState;
 
     public DonationService(DonationRepository donations, BroadcastRepository broadcasts, ReplayRepository replays,
-                           UserRepository users, PaymentGateway gateway, LiveRooms rooms) {
+                           UserRepository users, PaymentGateway gateway, BroadcastLiveState liveState) {
         this.donations = donations;
         this.broadcasts = broadcasts;
         this.replays = replays;
         this.users = users;
         this.gateway = gateway;
-        this.rooms = rooms;
+        this.liveState = liveState;
     }
 
     // ---- 1) 주문 만들기 ----
@@ -275,7 +275,7 @@ public class DonationService {
             long id = b.getId();
             long[] t = totals(Target.BROADCAST, id);
             Map<String, Object> msg = Map.of("type", "donation", "donation", Item.from(d), "total", t[0], "count", t[1]);
-            AfterCommit.run(() -> rooms.sendToAll(id, msg));
+            AfterCommit.run(() -> liveState.sendToAll(id, msg));
         }
         log.info("후원 확정 order={} amount={} recipient={}", d.getOrderId(), d.getAmount(), d.getRecipient().getId());
     }

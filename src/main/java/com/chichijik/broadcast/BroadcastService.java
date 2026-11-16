@@ -32,12 +32,12 @@ public class BroadcastService {
 
     private final BroadcastRepository repository;
     private final UserRepository users;
-    private final LiveRooms rooms;
+    private final BroadcastLiveState liveState;
 
-    public BroadcastService(BroadcastRepository repository, UserRepository users, LiveRooms rooms) {
+    public BroadcastService(BroadcastRepository repository, UserRepository users, BroadcastLiveState liveState) {
         this.repository = repository;
         this.users = users;
-        this.rooms = rooms;
+        this.liveState = liveState;
     }
 
     /** 방송 중을 먼저(최근 시작 순), 그다음 최근 종료된 방송 30개 */
@@ -45,7 +45,7 @@ public class BroadcastService {
     public List<BroadcastResponse> list() {
         List<BroadcastResponse> result = new ArrayList<>();
         for (Broadcast b : repository.findAllByStatusOrderByStartedAtDesc(Broadcast.Status.LIVE)) {
-            result.add(BroadcastResponse.from(b, rooms.viewerCount(b.getId())));
+            result.add(BroadcastResponse.from(b, liveState.viewerCount(b.getId())));
         }
         for (Broadcast b : repository.findTop30ByStatusOrderByEndedAtDesc(Broadcast.Status.ENDED)) {
             result.add(BroadcastResponse.from(b, 0));
@@ -55,7 +55,7 @@ public class BroadcastService {
 
     @Transactional(readOnly = true)
     public BroadcastResponse get(long id) {
-        return BroadcastResponse.from(find(id), rooms.viewerCount(id));
+        return BroadcastResponse.from(find(id), liveState.viewerCount(id));
     }
 
     /** 방송 시작: 로그인 사용자가 소유자(스트리머)가 됩니다. */
@@ -75,8 +75,8 @@ public class BroadcastService {
         Ownership.requireOwner(b.getOwner(), me, "이 방송을 수정할 권한이 없습니다.");
         String title = validTitle(rawTitle);
         b.rename(title);
-        if (b.isLive()) AfterCommit.run(() -> rooms.sendToAll(id, Map.of("type", "title", "title", title)));
-        return BroadcastResponse.from(b, rooms.viewerCount(id));
+        if (b.isLive()) AfterCommit.run(() -> liveState.sendToAll(id, Map.of("type", "title", "title", title)));
+        return BroadcastResponse.from(b, liveState.viewerCount(id));
     }
 
     /** 종료: 소유자만. 이미 종료됐으면 그대로 성공 */
@@ -84,8 +84,8 @@ public class BroadcastService {
     public BroadcastResponse end(long id, LoginUser me) {
         Broadcast b = find(id);
         Ownership.requireOwner(b.getOwner(), me, "이 방송을 종료할 권한이 없습니다.");
-        endAndClose(b);
-        return BroadcastResponse.from(b, 0);
+        endIfLive(id);
+        return BroadcastResponse.from(find(id), 0);
     }
 
     /** 기록 삭제: 소유자만, 종료된 방송만. 댓글은 DB에서 함께 삭제(ON DELETE CASCADE) */
@@ -114,7 +114,7 @@ public class BroadcastService {
     /** 송출자 연결이 끊기면 즉시 종료합니다. */
     @Transactional
     public void endBecauseHostLeft(long id) {
-        repository.findById(id).ifPresent(this::endAndClose);
+        endIfLive(id);
     }
 
     /** 방송을 시작만 하고 송출 화면이 연결되지 않은 경우(바로 창을 닫는 등)를 정리합니다. */
@@ -123,9 +123,9 @@ public class BroadcastService {
     public void endOrphans() {
         Instant cutoff = Instant.now().minus(HOST_CONNECT_GRACE);
         for (Broadcast b : repository.findAllByStatusOrderByStartedAtDesc(Broadcast.Status.LIVE)) {
-            if (b.getStartedAt().isBefore(cutoff) && !rooms.hasHost(b.getId())) {
+            if (b.getStartedAt().isBefore(cutoff) && !liveState.hasHost(b.getId())) {
                 log.info("송출 연결이 없는 방송 {} 종료", b.getId());
-                endAndClose(b);
+                endIfLive(b.getId());
             }
         }
     }
@@ -139,13 +139,14 @@ public class BroadcastService {
     }
 
     /**
-     * 종료 기록이 DB에 커밋된 뒤에 시청자·송출자에게 ended 를 보냅니다.
+     * 방송 중일 때만 종료로 바꾸는 조건부 갱신. 실제로 바꾼 쪽만 종료 알림을 보내므로
+     * 같은 방송을 여러 곳에서 동시에 종료해도 ended 는 한 번만 나갑니다.
+     * 알림은 종료 기록이 DB에 커밋된 뒤에 보냅니다.
      * (커밋 전에 보내면 클라이언트가 곧바로 다시 조회했을 때 아직 방송 중으로 보입니다.)
      */
-    private void endAndClose(Broadcast b) {
-        b.end(Instant.now());
-        long id = b.getId();
-        AfterCommit.run(() -> rooms.close(id));
+    private void endIfLive(long id) {
+        if (repository.endIfLive(id, Instant.now()) == 0) return;
+        AfterCommit.run(() -> liveState.ended(id));
     }
 
     private static String validTitle(String raw) {
