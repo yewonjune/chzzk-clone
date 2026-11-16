@@ -149,6 +149,30 @@ class ClusterSharingTest {
         }
     }
 
+    @Test
+    void Redis가_응답하지_않는_동안_readiness가_내려가고_돌아오면_다시_UP() throws Exception {
+        for (String server : List.of(cluster.a, cluster.b)) {
+            assertThat(readiness(server).statusCode()).isEqualTo(200);
+        }
+        var docker = cluster.redis.getDockerClient();
+        docker.pauseContainerCmd(cluster.redis.getContainerId()).exec();
+        try {
+            HttpResponse<String> down = readiness(cluster.a);
+            assertThat(down.statusCode()).as(down.body()).isEqualTo(503);
+            assertThat(json(down).get("status").asString()).isEqualTo("DOWN");
+            // liveness 는 외부 의존과 무관: 재시작시키지 않음
+            assertThat(ApiClient.anonymousWithoutSession(cluster.a).get("/actuator/health/liveness").statusCode())
+                    .isEqualTo(200);
+        } finally {
+            docker.unpauseContainerCmd(cluster.redis.getContainerId()).exec();
+        }
+        assertThat(readiness(cluster.a).statusCode()).isEqualTo(200);
+    }
+
+    static HttpResponse<String> readiness(String server) throws Exception {
+        return ApiClient.anonymousWithoutSession(server).get("/actuator/health/readiness");
+    }
+
     /** 외부 영상 주소로 다시보기 하나 등록 (댓글·후원 대상) */
     static long externalReplay(ApiClient owner) throws Exception {
         var res = owner.postMultipart("/api/replays", Map.of("title", "외부 영상", "videoUrl", "https://example.com/a.mp4"));

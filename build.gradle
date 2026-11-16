@@ -27,6 +27,8 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'org.springframework.boot:spring-boot-starter-websocket'
     implementation 'org.springframework.boot:spring-boot-starter-security'
+    // 5단계 운영: Kubernetes liveness·readiness probe (/actuator/health/**)
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
     // 5단계 cluster 프로필: 로그인 세션을 Redis 에 공유 (기본 프로필에서는 자동 구성을 끔)
     implementation 'org.springframework.boot:spring-boot-starter-session-data-redis'
     runtimeOnly 'com.h2database:h2'

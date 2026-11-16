@@ -8,3 +8,4 @@ data/
 .claude/
 certs/
 *.p12
+.env.cluster

@@ -1,0 +1,16 @@
+# 이미지 빌드에 필요한 것: gradlew, gradle/, build.gradle, settings.gradle, src/
+.git
+.gradle
+.idea
+.claude
+build
+out
+data
+certs
+k8s
+docs
+samples
+*.iml
+*.p12
+.env
+.env.*

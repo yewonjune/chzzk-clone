@@ -88,6 +88,11 @@ final class ApiClient {
         return c;
     }
 
+    /** 세션 없이 보내는 호출 (Kubernetes probe 처럼: 세션 저장소가 멈춰도 요청이 막히지 않게 /api/auth/me 를 부르지 않음) */
+    static ApiClient anonymousWithoutSession(String base) {
+        return new ApiClient(base);
+    }
+
     static ApiClient signUp(String base, String username, String nickname) throws Exception {
         ApiClient c = anonymous(base);
         HttpResponse<String> res = c.postJson("/api/auth/signup",
