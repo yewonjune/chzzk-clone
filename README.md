@@ -7,13 +7,15 @@
 | 1단계 | 다시보기(녹화 영상) 등록 · 목록 · 상세 · 재생 · 영구 저장 |
 | 2단계 | 휴대폰 카메라·마이크 라이브 송출, 방송 목록·시청, 방송 중/종료 상태 표시 |
 | 3단계 | 회원가입·로그인·로그아웃, 소유자 권한(등록·수정·삭제·송출 제어), 댓글(작성·목록·수정·삭제) |
-| **4단계 (현재)** | 도네이션: 방송자·금액 선택 → **테스트 모드 결제** → 서버가 승인·금액·받는 사람 확인 후 확정, 중복 승인 통지 방지, 방송별 후원 내역·합계 |
+| 4단계 | 도네이션: 방송자·금액 선택 → **테스트 모드 결제** → 서버가 승인·금액·받는 사람 확인 후 확정, 중복 승인 통지 방지, 방송별 후원 내역·합계 |
+| **5단계 (현재)** | 로컬 오토스케일: 컨테이너 이미지, Docker Desktop Kubernetes 에서 2~5개 인스턴스 + HPA, 상태를 PostgreSQL·Redis·공유 볼륨으로 외부화, 서버가 바뀌어도 방송이 이어지는 재연결 유예 |
 
 - 백엔드: Java 17+ · Spring Boot 4.1 (Spring MVC, Spring Data JPA, Spring WebSocket, **Spring Security**)
 - 인증: 서버 세션(쿠키) + BCrypt 비밀번호 + CSRF 토큰 ([ADR-0003](docs/adr/0003-session-auth-with-spring-security.md))
 - 결제: **토스페이먼츠 테스트 모드**(테스트 키만 허용, 실제 돈이 나가지 않음). 키가 없으면 같은 2단계 흐름을 흉내 내는 **내장 테스트 결제창**으로 동작 ([ADR-0005](docs/adr/0005-donation-confirmed-by-server.md))
 - 라이브: **WebRTC** (휴대폰 → 시청자 P2P 직접 전송, 서버는 WebSocket으로 연결 정보와 댓글 알림만 중계)
-- 저장소: H2 파일 DB — 별도 DB 설치 없이 `data/` 폴더에 영구 저장
+- 저장소: 기본은 H2 파일 DB(별도 설치 없이 `data/` 폴더). 여러 인스턴스(`cluster` 프로필)는 **PostgreSQL + Redis(세션·방송 실시간 상태) + 공유 볼륨** ([ADR-0006](docs/adr/0006-shared-state-for-multiple-instances.md))
+- 배포: Docker 이미지 + Docker Desktop 내장 Kubernetes(Deployment·LoadBalancer Service·HPA), 부하는 k6
 - 빌드: Gradle (Wrapper 포함, Gradle 설치 불필요)
 - 프론트엔드: 정적 HTML/CSS/JS (`src/main/resources/static`, 빌드 과정 없음)
 
@@ -21,7 +23,8 @@
 
 ## 실행 방법
 
-필요 환경: **JDK 17 이상** (개발·검증은 JDK 25에서 진행). ffmpeg·Docker·DB 서버 등 다른 설치는 필요 없습니다.
+필요 환경: **JDK 17 이상** (개발·검증은 JDK 25에서 진행). 서버 한 대로 실행할 때는 ffmpeg·Docker·DB 서버 등 다른 설치가 필요 없습니다.
+여러 인스턴스·오토스케일은 **Docker Desktop(Kubernetes 켜기)** 이 필요합니다 → [여러 인스턴스로 실행하기 (5단계)](#여러-인스턴스로-실행하기-5단계).
 
 ### IntelliJ IDEA
 
@@ -41,8 +44,10 @@
 | 명령 | 설명 |
 | --- | --- |
 | `./gradlew bootRun` | 서버 실행 |
-| `./gradlew test` | 자동 테스트 17개 (도네이션 결제 흐름 · 권한 매트릭스 · 다시보기 흐름 · 방송 흐름) |
-| `./gradlew bootJar` | 실행 jar 생성 → `java -jar build/libs/chichijik-0.1.0.jar` |
+| `./gradlew test` | 자동 테스트 21개 (도네이션 결제 흐름 · 권한 매트릭스 · 다시보기 흐름 · 방송 흐름 · 상태 확인), Docker 불필요 |
+| `./gradlew clusterTest` | 서버 2대 테스트 17개 (Testcontainers 로 PostgreSQL·Redis, **Docker 필요**) |
+| `./gradlew bootJar` | 실행 jar 생성 → `java -jar build/libs/chichijik.jar` |
+| `docker build -t chichijik:local .` | 컨테이너 이미지 (JDK 설치 없이 Docker 만으로 빌드) |
 
 > 계정은 처음에 하나도 없습니다. 회원가입 화면에서 직접 만드세요(관리자·기본 계정·기본 비밀번호 없음).
 
@@ -77,9 +82,74 @@ TURN_PASSWORD=
 PAYMENT_PROVIDER=auto           # auto: 아래 키가 있으면 토스페이먼츠 테스트 모드, 없으면 내장 테스트 결제창 / toss / fake
 TOSS_CLIENT_KEY=                # 토스페이먼츠 "API 개별 연동 키" 클라이언트 키 (test_ck_ 로 시작)
 TOSS_SECRET_KEY=                # 같은 화면의 시크릿 키 (test_sk_ 로 시작) — 절대 저장소에 넣지 마세요
+
+# 5단계: 방송 재연결·여러 인스턴스 (기본값으로 충분)
+RECONNECT_GRACE=20s             # 송출 연결이 끊긴 뒤 방송을 종료하기 전까지 기다리는 시간 (재연결 유예)
+SWEEP_INTERVAL_MS=10000         # 송출 연결 없는 방송·만료된 시청자 정리 주기
+HEARTBEAT_INTERVAL=5s           # (cluster) 인스턴스 하트비트 갱신 주기
+HEARTBEAT_TTL=15s               # (cluster) 하트비트가 이만큼 끊기면 그 인스턴스의 연결 기록을 정리
+SHUTDOWN_PHASE_TIMEOUT=90s      # 종료 신호를 받은 뒤 진행 중인 요청(업로드 등)을 마무리하는 최대 시간
 ```
 
+**`cluster` 프로필** (`SPRING_PROFILES_ACTIVE=cluster`, Kubernetes 에서는 `k8s/app.yaml` 이 설정)에서만 쓰는 값입니다. 빠지면 서버가 시작하지 않습니다.
+
+```dotenv
+DB_URL=jdbc:postgresql://postgres:5432/chichijik
+DB_USERNAME=chichijik
+DB_PASSWORD=<직접 정한 값>
+REDIS_HOST=redis
+REDIS_PORT=6379                 # 기본 6379
+REDIS_PASSWORD=                 # (선택)
+REDIS_TIMEOUT=2s                # Redis 응답 대기 (readiness 가 빨리 DOWN 이 되도록)
+UPLOAD_DIR=/data/uploads        # 모든 인스턴스가 같이 쓰는 폴더
+```
+
+Kubernetes 용 비밀 값은 [`.env.cluster.example`](.env.cluster.example)을 `.env.cluster` 로 복사해 채웁니다(`.env.cluster` 는 git 에서 제외).
+
 > 결제 키는 **테스트 키(`test_`로 시작)만** 받습니다. `live_` 키를 넣으면 서버가 시작하지 않습니다. 실제 금전 결제가 일어날 수 있는 설정은 없습니다.
+
+## 여러 인스턴스로 실행하기 (5단계)
+
+필요 환경: **Docker Desktop** (Settings → Kubernetes → *Enable Kubernetes* 켜기), `kubectl`. JDK 는 필요 없습니다(이미지 안에서 빌드). 아래 명령은 저장소 루트에서 실행합니다. Windows 는 Git Bash 기준입니다.
+
+```bash
+kubectl config use-context docker-desktop
+```
+
+**1) metrics-server 설치 (한 번만, HPA 의 CPU 지표용)** — Docker Desktop 의 kubelet 인증서가 자체 서명이라 `--kubelet-insecure-tls` 를 추가합니다.
+
+```bash
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml
+kubectl -n kube-system patch deployment metrics-server --type=json -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+```
+
+**2) 이미지 빌드** (Docker Desktop Kubernetes 는 로컬 이미지를 그대로 씁니다. 레지스트리 불필요)
+
+```bash
+docker build -t chichijik:local .
+```
+
+**3) 비밀 값 Secret** — 예시를 복사해 `DB_PASSWORD` 등을 직접 정한 값으로 바꿉니다. `.env.cluster` 는 git 에서 제외되어 있습니다.
+
+```bash
+cp .env.cluster.example .env.cluster
+kubectl apply -f k8s/00-namespace.yaml
+kubectl -n chichijik create secret generic chichijik-env --from-env-file=.env.cluster
+```
+
+**4) 배포**
+
+```bash
+kubectl apply -f k8s/
+kubectl -n chichijik rollout status deploy/chichijik
+kubectl -n chichijik get pods,svc,hpa
+```
+
+서버 Pod 2개가 `Running 1/1`, HPA `TARGETS` 가 `cpu: 3%/50%` 처럼 숫자로 보이면 준비된 것입니다(지표는 1분쯤 걸림). 브라우저에서 http://localhost:8080 으로 접속합니다.
+
+- 휴대폰으로 송출하려면 HTTPS 가 필요합니다: 아래 [휴대폰으로 송출하기](#휴대폰으로-송출하기)처럼 키스토어를 만든 뒤 `kubectl -n chichijik create secret generic chichijik-tls --from-file=keystore.p12=certs/chichijik.p12`, `.env.cluster` 에 `SSL_ENABLED=true`·`SSL_KEYSTORE_PASSWORD` 를 넣고 Secret 을 다시 만든 다음 `kubectl -n chichijik rollout restart deployment/chichijik`. 휴대폰에서는 `https://<PC IP>:8080` (Windows 방화벽에서 8080 허용).
+- 코드를 바꾼 뒤: 2) 의 이미지 빌드 → `kubectl -n chichijik rollout restart deployment/chichijik`
+- 전부 지우기(DB·업로드 데이터 포함): `kubectl delete namespace chichijik`
 
 ## 공개 범위와 권한
 
@@ -110,36 +180,32 @@ TOSS_SECRET_KEY=                # 같은 화면의 시크릿 키 (test_sk_ 로 �
 
 ## 이번 단계 구현 범위
 
-**4단계에서 구현함 — 도네이션**
-- **후원할 방송자와 금액 선택** (`/donate.html`)
-  - 방송 시청 화면·송출 화면·다시보기 화면의 **♥ 후원하기** → 새 창에서 후원 화면이 열려 시청이 끊기지 않음
-  - 후원 화면에서 대상 선택: 방송 중인 방송, 지난 방송, 다시보기 중 하나 → **받는 사람은 그 방송의 스트리머**
-  - 금액: 1,000 / 3,000 / 5,000 / 10,000 / 50,000원 또는 직접 입력(1,000~1,000,000원, 100원 단위), 메시지(선택, 100자)
-  - 로그인 필요, 자기 방송에는 후원 불가(서버가 400)
-- **테스트 모드 결제 요청 → 승인 확인 흐름** (실제 PG와 같은 2단계)
-  1. 서버가 **주문(PENDING)** 을 먼저 만들고 금액·받는 사람을 DB에 고정, 추측할 수 없는 주문번호 발급
-  2. 브라우저가 PG 결제창을 엶 → 결제 인증 후 `successUrl`(또는 실패·취소 시 `failUrl`)로 돌아옴
-  3. 결과 화면이 돌아온 값(`paymentKey`, `orderId`, `amount`)을 **서버로 보냄** — 화면은 결과를 판단하지 않음
-  4. 서버가 **저장된 주문 금액 = 돌아온 금액**, **받는 사람 = 현재 방송 소유자**, **주문자 = 로그인 사용자**를 확인 → PG **승인 API** 호출 → PG 응답의 상태(`DONE`)·주문번호·금액을 다시 대조 → 모두 맞을 때만 **PAID 확정**
-  - PG: 토스페이먼츠 테스트 모드(키 설정 시) 또는 내장 테스트 결제창(키 없을 때). 내장 결제창에는 **성공 / 승인 단계 거절 / 결제창 실패 / 취소** 버튼이 있음
-  - PG와 통신이 끊겨 결과를 모를 때는 실패로 바꾸지 않고 대기(PENDING) — 웹훅이나 새로고침으로 다시 확인
-- **같은 승인 통지가 반복되어도 한 번만 적립**
-  - 주문 행을 잠그고(`SELECT … FOR UPDATE`) **PENDING → PAID 전이를 한 번만** 허용. 이미 PAID면 같은 결과를 그대로 돌려줌
-  - 결과 화면 새로고침, 웹훅 재전송, 승인 요청과 웹훅이 동시에 와도 합계는 한 번만 증가
-  - `payment_key`·`order_id` UNIQUE 제약으로 한 결제가 두 주문에 적립되는 것도 DB가 막음
-  - 웹훅은 **본문을 믿지 않고** `paymentKey`로 PG에 결제를 다시 조회해 반영(PG에서 취소된 결제는 REFUNDED로 바꾸고 합계에서 제외)
-- **방송별 후원 내역과 합계**
-  - 방송·다시보기 화면에 **합계·건수와 최근 후원 30건**(후원자 닉네임, 금액, 메시지) — 확정(PAID)된 후원만
-  - **방송 중에는 실시간**: 후원이 확정되면 시청 화면과 휴대폰 송출 화면에 알림이 뜨고 합계가 바로 바뀜
-- 결과 화면(`/donate-result.html`): 완료 / 실패(사유·코드) / 취소 / 만료를 서버가 확인한 상태로 표시
-- 결제창을 열고 30분 동안 돌아오지 않은 주문은 자동으로 EXPIRED
+**5단계에서 구현함 — 로컬 오토스케일**
+- **컨테이너 이미지**: 멀티스테이지 `Dockerfile` (JDK 17 로 빌드 → JRE 17 로 실행, root 아닌 사용자). Docker 만 있으면 빌드
+- **여러 인스턴스 실행**: Docker Desktop 내장 Kubernetes 에 `k8s/` 적용 → 서버 Deployment(`cluster` 프로필), PostgreSQL, Redis, 업로드 공유 볼륨
+- **자동 확장·축소**: HPA — **평균 CPU 50%** 목표, **최소 2 ~ 최대 5개**, 부하가 사라지면 60초 지켜본 뒤 축소 (metrics-server 사용)
+- **요청 분산**: `LoadBalancer` Service(8080)가 Pod 들에 나눠 보냄. WebSocket 도 같은 Service 로
+- **상태를 인스턴스 밖에** ([ADR-0006](docs/adr/0006-shared-state-for-multiple-instances.md))
+  - 기록(사용자·방송·다시보기·댓글·후원, 가짜 PG 결제) → PostgreSQL
+  - 로그인 세션·CSRF 토큰 → Redis (Spring Session). 어느 Pod 로 가도 로그인 유지, 로그아웃도 모든 Pod 에 즉시
+  - 업로드 영상 → 모든 Pod 가 마운트하는 공유 볼륨
+  - 방송 실시간 상태(송출자 연결, 시청자 목록·수·상한) → Redis. 방송 중 메시지(시그널·댓글·후원·제목·종료)는 **Redis pub/sub 으로 모든 Pod 에 중계** → 송출자와 시청자가 다른 Pod 에 붙어도 방송됨
+- **스케일 인·장애에도 방송 유지 — 재연결 유예**
+  - 송출 연결이 끊겨도 바로 종료하지 않고 **20초** 기다림. 그 안에 다시 연결되면 같은 방송이 이어짐
+  - 내려가는 Pod 는 열린 연결을 **4001**("다른 서버로 재연결")로 닫고, 송출·시청 화면은 **자동으로 다른 Pod 에 재연결**(시청자는 같은 viewerId 로 이어 붙어 시청자 수가 늘지 않음, 영상 P2P 는 그대로)
+  - 강제로 죽은 Pod 는 하트비트(15초)가 끊기면 다른 Pod 가 그 시청자 기록을 정리하고, 송출자는 유예 뒤 종료
+  - 서버가 새로 떠도 방송을 끝내지 않음 (1~4단계의 "기동 시 방송 중인 방송 전부 종료" 제거)
+- **운영**: Actuator readiness(DB·Redis 포함)·liveness probe, graceful shutdown(최대 90초 마무리, 120초 뒤 강제 종료)
+- **부하 스크립트**: [`load/autoscale.js`](load/autoscale.js) (k6, Docker 로 실행) — 부하 시나리오 + 같은 로그인 사용자로 상태 유지를 계속 확인하는 시나리오
+- **자동 테스트**: 기본 21개 + 서버 2대 `clusterTest` 17개 (서버 종료·강제 종료 시나리오 포함)
 
 **이전 단계 기능 (유지)**
+- 4단계: 도네이션(테스트 모드 결제 → 서버 확정, 중복 승인 통지 방지, 방송별 후원 내역·합계)
 - 3단계: 회원가입·로그인·로그아웃, 소유자만 다시보기 수정·삭제 / 방송 제목 수정·종료·기록 삭제 / 송출 연결, 댓글(작성·목록·수정·삭제, 방송 중 실시간)
-- 2단계: 휴대폰 송출(카메라 전환·마이크 끄기·종료), WebRTC 시청, 방송 중/종료 상태, 끊김 즉시 종료, 시청자 상한, HTTPS·STUN/TURN 설정
+- 2단계: 휴대폰 송출(카메라 전환·마이크 끄기·종료), WebRTC 시청, 방송 중/종료 상태, 끊김 시 종료(5단계부터 재연결 유예 뒤), 시청자 상한, HTTPS·STUN/TURN 설정
 - 1단계: 다시보기 등록(파일 업로드·외부 주소), 목록·상세·재생(구간 탐색), 조회수, 재시작 후 유지
 
-**이번 단계에서 하지 않음**: 실제(라이브) 결제, 정산·출금, 후원 환불 요청 화면(PG 쪽 취소는 웹훅으로 반영), 웹훅 서명 검증(대신 PG 재조회), 프로필·회원 탈퇴, 방송 녹화
+**이번 단계에서 하지 않음**: 클라우드 배포·원격 레지스트리·Ingress, 오브젝트 스토리지(MinIO/S3), PostgreSQL·Redis 고가용성(Redis 재시작 시 모두 로그아웃), 요청 수 등 사용자 정의 지표 스케일링, 스키마 마이그레이션 도구, H2 → PostgreSQL 데이터 이전, 송출 화면 새로고침 후 같은 방송 이어받기
 
 ## 도네이션 결제 설정
 
@@ -229,6 +295,68 @@ cloudflared tunnel --url http://localhost:8080
 - 방송을 시작하려면 휴대폰에서도 **로그인**해야 합니다(시청은 로그인 불필요).
 
 ## 직접 확인 절차
+
+### E. 로컬 오토스케일 (5단계) — 부하에 따라 늘고 줄기, 그동안 상태 유지
+
+준비: [여러 인스턴스로 실행하기](#여러-인스턴스로-실행하기-5단계)의 1)~4) 를 마치고 서버 Pod 2개가 Ready 인 상태.
+
+1. 터미널 1에서 Pod 수를 지켜봅니다.
+   ```bash
+   kubectl -n chichijik get hpa,pods -w
+   ```
+2. 터미널 2에서 k6 로 부하를 겁니다(설치 없이 Docker 이미지로, 약 10분).
+   ```bash
+   docker run --rm -i -e BASE_URL=http://host.docker.internal:8080 grafana/k6:0.54.0 run - < load/autoscale.js
+   ```
+   - `load` 시나리오: 비로그인 시청자 최대 60명이 방송·다시보기 목록·상세·댓글을 계속 조회 (1분 램프업 → 4분 유지 → 30초 감소)
+   - `watch` 시나리오: 시작할 때 가입한 사용자 한 명이 **같은 세션 쿠키로** 10분 동안 1초마다 로그인 상태·방송 목록·댓글을 확인. 부하가 끝난 뒤 4분 더 지켜보므로 **스케일 인 중**도 포함됨
+3. 확인할 것
+   - ✅ 부하가 걸리면 HPA `TARGETS` 가 50% 를 넘고 `REPLICAS` 가 2 → 5 로 늘어남
+   - ✅ 부하가 끝나면 60초 지켜본 뒤 5 → 2 로 줄어듦
+   - ✅ k6 결과에서 `로그인 상태 유지`·`방송 목록 유지`·`댓글 유지` 가 모두 ✓ (`checks{scenario:watch}` 100%)
+   - (선택) 그동안 브라우저에서 로그인한 채 새로고침해도 로그아웃되지 않고, 방송 중인 방송을 보던 시청 화면이 끊기지 않는지
+
+**실제로 확인한 결과** (Docker Desktop Kubernetes v1.36, 노드 1개 16 CPU / 2026-11-16)
+
+15초마다 `kubectl -n chichijik get hpa` 와 서버 Pod 목록을 찍은 기록에서 옮겼습니다(Pod 이름 앞부분 `chichijik-5c7dfc895c-` 생략).
+
+```text
+시각      HPA TARGETS     REPLICAS  서버 Pod
+22:42:44  cpu: 12%/50%    2         bth5p tf7j9                            ← k6 램프업 중
+22:43:00  cpu: 200%/50%   2 → 5     bth5p tf7j9 + bkqvq hpxtr j88nr(0/1 기동 중)   ← 스케일 아웃
+22:44:17  cpu: 199%/50%   5         5개 모두 1/1 Running
+22:45:03  cpu: 121%/50%   5         5개 (최대 부하 유지)
+22:47:53  cpu: 148%/50%   5         5개 (부하 종료 직전)
+22:48:08  cpu: 7%/50%     5         bth5p tf7j9   (bkqvq hpxtr j88nr 종료: 60초 안정화 뒤 스케일 인 5 → 2)
+22:49:09  cpu: 5%/50%     2         bth5p tf7j9
+22:53:30  cpu: 1%/50%     2         bth5p tf7j9   (watch 끝까지 2개 유지)
+```
+
+```text
+$ kubectl -n chichijik describe hpa chichijik   (Events 일부)
+  Normal  SuccessfulRescale  New size: 5; reason: cpu resource utilization (percentage of request) above target
+  Normal  SuccessfulRescale  New size: 2; reason: All metrics below target
+```
+
+k6 결과 요약:
+
+```text
+     ✓ 로그인 상태 유지
+     ✓ 방송 목록 유지
+     ✓ 댓글 유지
+     checks.........................: 100.00% 1425 out of 1425
+     ✓ { scenario:watch }...........: 100.00% 1425 out of 1425
+     http_req_duration..............: avg=101.38ms med=95.72ms p(90)=204.84ms p(95)=300.22ms max=2.15s
+     http_req_failed................: 0.02%   27 out of 129190
+     ✓ { scenario:load }............: 0.02%   27 out of 127756
+     http_reqs......................: 129190  214.970863/s
+load  ✓ [ 100% ] 00/60 VUs  5m30s
+watch ✓ [ 100% ] 1 VUs      10m0s
+```
+
+- 스케일 아웃(2 → 5)과 스케일 인(5 → 2)이 모두 일어나는 동안 **같은 로그인 세션으로 1425번 확인해 한 번도 로그아웃되지 않았고**, 방송 목록·댓글 개수도 줄지 않았습니다. 요청은 매번 Service 가 고른 Pod 로 갔습니다.
+- 부하 요청 27건(0.02%)은 k6 컨테이너 → `host.docker.internal:8080` 연결을 새로 맺다가 `dial: i/o timeout` 으로 실패한 것입니다(앱 오류 응답은 0건). 노트북 한 대에서 k6·Pod 5개·Docker Desktop 포트 전달이 함께 돌 때 생긴 것으로 보입니다.
+- 기록 시작 직후(22:41~22:42)에도 2 → 5 → 2 가 한 번 있었는데, 직전에 스크립트를 확인하려고 짧게 돌린 시험 실행(5명, 1분)의 부하가 HPA 에 늦게 반영된 것입니다. 위 표는 본 실행부터입니다.
 
 ### D. 도네이션 (4단계) — 성공 · 실패 · 취소 · 승인 통지 중복
 
@@ -355,7 +483,7 @@ cloudflared tunnel --url http://localhost:8080
    - ✅ **송출 종료 확인**: 휴대폰에 "방송을 종료했습니다"와 방송 시간·시작/종료 시각이 나옵니다.
    - 시청 화면은 새로고침 없이 **"방송이 종료되었습니다"**와 **종료** 배지로 바뀝니다.
    - 메인 목록의 라이브 영역에서 해당 방송이 **종료**(흐린 카드, 방송 시간 표시)로 바뀝니다(최대 5초).
-9. (끊김 처리) 새 방송을 시작한 뒤 휴대폰에서 **탭을 닫거나 새로고침** → 시청 화면이 바로 "방송이 종료되었습니다"로 바뀌는지 확인합니다.
+9. (끊김 처리) 새 방송을 시작한 뒤 휴대폰에서 **탭을 닫거나 새로고침** → **재연결 유예(기본 20초)** 가 지나면 시청 화면이 "방송이 종료되었습니다"로 바뀌는지 확인합니다(정리 주기 때문에 최대 30초 정도).
 10. (시청자 상한) `MAX_VIEWERS_PER_BROADCAST=1`로 실행 후 시청 화면을 두 개 열면 두 번째에 "시청자가 가득 찼습니다"가 뜹니다.
 
 > 휴대폰 없이 PC 한 대로 흐름만 확인하려면: PC에 웹캠이 있으면 `http://localhost:8080/go-live.html`(localhost는 HTTPS 없이도 카메라 허용)에서 로그인 후 송출하고, 다른 브라우저 창에서 `http://127.0.0.1:8080`으로 시청하면 됩니다.
@@ -367,13 +495,16 @@ cloudflared tunnel --url http://localhost:8080
 1. 로그인 → 메인 → **＋ 다시보기 등록** → 제목 입력 → *파일 업로드* 탭에서 `samples/sample.mp4` 선택 → **등록하기**.
 2. 상세 화면(`/replay.html`)으로 이동해 재생·구간 이동이 되는지 확인합니다. (재생은 로그아웃 상태에서도 됩니다.)
 3. 메인 아래쪽 **다시보기** 영역에 카드(썸네일, `0:05`, 조회수)가 보이는지 확인합니다.
-4. 서버를 종료하고 다시 실행 → 계정·다시보기·종료된 방송 기록·댓글이 그대로 남아 있는지 확인합니다. (재시작 전에 방송 중이던 방송은 **종료**로 표시되고, 로그인 세션은 재시작 시 초기화되어 다시 로그인해야 합니다.)
+4. 서버를 종료하고 다시 실행 → 계정·다시보기·종료된 방송 기록·댓글이 그대로 남아 있는지 확인합니다. (재시작 전에 방송 중이던 방송은 송출 화면이 다시 붙지 않으면 재연결 유예 뒤 **종료**로 바뀌고, 기본 프로필의 로그인 세션은 재시작 시 초기화되어 다시 로그인해야 합니다.)
 
-자동 검증: `./gradlew test` — 실제 서버를 임시 폴더로 띄워 확인합니다(총 17개).
+자동 검증: `./gradlew test` — 실제 서버를 임시 폴더로 띄워 확인합니다(총 21개, Docker 불필요).
 - `DonationFlowTest`(6): 주문 검증·권한, 성공 후 중복 승인 통지 1회 적립, 동시 승인 요청, 금액 변조, 실패·취소, 웹훅 PG 재조회·환불
 - `PermissionTest`(6): 가입·로그인·로그아웃, CSRF, 다시보기·방송·댓글 권한 매트릭스, 댓글 페이지네이션
-- `BroadcastFlowTest`(3): 소유자만 송출, 시그널링, 방송 중 댓글·제목 실시간 전달, 시청자 상한, 끊김 시 즉시 종료, 종료 후 기록 삭제, 재시작 정리
+- `BroadcastFlowTest`(6): 소유자만 송출, 시그널링, 방송 중 댓글·제목 실시간 전달, 시청자 상한, 끊김 뒤 재연결 유예·종료, viewerId 로 이어 붙기, 동시 종료 한 번, 서버 종료 시 4001
+- `HealthProbeTest`(1): liveness·readiness 가 로그인 없이 200
 - `ReplayFlowTest`(2): 등록 → 목록 → Range 재생 → 재시작 후 유지, 입력 검증
+
+`./gradlew clusterTest` — Testcontainers 로 PostgreSQL·Redis 를 띄우고 `cluster` 프로필 서버 2대(일부는 별도 JVM 으로 강제 종료)로 확인합니다(총 17개, **Docker 필요**). 내용은 [5단계 설계 문서 3-5](docs/stage5-design.md#3-5-시험-방법).
 
 ## API
 
@@ -438,12 +569,13 @@ cloudflared tunnel --url http://localhost:8080
 
 ## 설계 문서
 
+- [docs/stage5-design.md](docs/stage5-design.md) — 5단계 아키텍처, 상태별 저장 위치, 스케일·장애 시나리오, 배포 구성
 - [docs/stage4-design.md](docs/stage4-design.md) — 4단계 아키텍처, ERD, 기술적 고민 및 개선 (결제 확정·중복 방지)
 - [docs/stage3-design.md](docs/stage3-design.md) — 3단계 설계 (인증·인가·댓글)
 - [docs/stage2-design.md](docs/stage2-design.md) — 2단계 설계 (라이브 송출)
 - [docs/stage1-design.md](docs/stage1-design.md) — 1단계 설계 (다시보기)
 - [GLOSSARY.md](GLOSSARY.md) — 용어집
-- [docs/adr/](docs/adr/) — 주요 설계 결정 기록 (WebRTC P2P, 방송/다시보기 분리, 세션 인증, 송출 키 → 소유자 검사, 서버 확정 도네이션)
+- [docs/adr/](docs/adr/) — 주요 설계 결정 기록 (WebRTC P2P, 방송/다시보기 분리, 세션 인증, 송출 키 → 소유자 검사, 서버 확정 도네이션, 상태 외부화·Redis 중계)
 
 ## 폴더 구조
 
@@ -451,18 +583,24 @@ cloudflared tunnel --url http://localhost:8080
 src/main/java/com/chichijik/
   ChichijikApplication.java     진입점
   user/                         사용자: 엔티티·가입·로그인(AuthController)·세션 사용자(LoginUser)
-  broadcast/                    방송: 엔티티·서비스(소유자 검사)·컨트롤러, 방(LiveRooms), WebSocket 시그널링
+  broadcast/                    방송: 엔티티·서비스(소유자 검사, 재연결 유예 정리)·컨트롤러, WebSocket 시그널링,
+                                방송 실시간 상태(BroadcastLiveState: 메모리 / Redis 구현)
   replay/                       다시보기: 엔티티·서비스(검증, 파일 저장, 소유자 검사)·컨트롤러
   comment/                      댓글: 엔티티·서비스(작성자/스트리머 검사, 실시간 알림)·컨트롤러
   donation/                     도네이션: 주문 엔티티·서비스(승인 대조, 행 잠금 멱등 확정, 웹훅)·컨트롤러
-  payment/                      결제 서비스 연동: PaymentGateway, 토스페이먼츠 테스트 모드, 내장 테스트 PG
+  payment/                      결제 서비스 연동: PaymentGateway, 토스페이먼츠 테스트 모드, 내장 테스트 PG(DB 저장)
   config/                       Spring Security, /media/** 영상 제공, WebSocket, 이전 단계 DB 호환
   common/                       공통 예외·오류 응답, 소유자 검사(Ownership), 커밋 후 실행(AfterCommit)
 src/main/resources/
   application.properties        설정 (환경변수 기본값)
+  application-cluster.properties  여러 인스턴스용: PostgreSQL · Redis 세션 · 공유 업로드 폴더
   static/                       메인(index) · 로그인(auth) · 방송 시작(go-live) · 방송 시청(live) · 다시보기(replay, upload) · 댓글 위젯(comments.js)
                                 후원(donate) · 후원 결과(donate-result) · 내장 테스트 결제창(fake-pg) · 후원 위젯(donations.js)
 src/test/java/                  통합 테스트 (ApiClient: 사용자별 세션·CSRF 를 가진 테스트용 클라이언트)
+                                Cluster*Test: Testcontainers 로 PostgreSQL·Redis + 서버 2대 (./gradlew clusterTest)
+Dockerfile, .dockerignore       컨테이너 이미지
+k8s/                            Kubernetes 배포 (namespace · PostgreSQL · Redis · 업로드 PVC · 서버 · Service · HPA)
+load/autoscale.js               k6 부하 스크립트
 samples/                        확인용 샘플 영상
 data/, certs/                   (git 제외) DB·업로드 파일, HTTPS 인증서
 ```
