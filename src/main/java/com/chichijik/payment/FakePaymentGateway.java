@@ -48,10 +48,10 @@ public class FakePaymentGateway implements PaymentGateway {
             if (p == null || !p.getOrderId().equals(orderId)) {
                 return new PaymentException("NOT_FOUND_PAYMENT_SESSION", "결제 시간이 만료되어 결제 진행 데이터가 존재하지 않습니다.", true);
             }
-            if ("DONE".equals(p.getStatus())) {
+            if (p.getStatus() == FakePgPayment.Status.DONE) {
                 return new PaymentException(PaymentException.ALREADY_PROCESSED, "이미 처리된 결제 입니다.", true);
             }
-            if (!"IN_PROGRESS".equals(p.getStatus())) {
+            if (p.getStatus() != FakePgPayment.Status.IN_PROGRESS) {
                 return new PaymentException("NOT_AVAILABLE_PAYMENT", "결제가 불가능한 상태입니다.", true);
             }
             if (p.getAmount() != amount) {

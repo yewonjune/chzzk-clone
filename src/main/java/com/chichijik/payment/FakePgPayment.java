@@ -4,6 +4,8 @@ import java.time.Instant;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
@@ -14,6 +16,9 @@ import jakarta.persistence.Table;
 @Entity
 @Table(name = "fake_pg_payments")
 class FakePgPayment {
+
+    /** 토스페이먼츠 Payment.status 와 같은 이름 (DB 에는 이름 문자열로 저장) */
+    enum Status { IN_PROGRESS, DONE, CANCELED, ABORTED }
 
     @Id
     @Column(length = 64)
@@ -28,9 +33,9 @@ class FakePgPayment {
     @Column(nullable = false)
     private boolean rejectOnConfirm;
 
-    /** 토스페이먼츠 Payment.status 와 같은 값: IN_PROGRESS, DONE, CANCELED, ABORTED */
+    @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
-    private String status;
+    private Status status;
 
     private Instant approvedAt;
 
@@ -42,7 +47,7 @@ class FakePgPayment {
         this.orderId = orderId;
         this.amount = amount;
         this.rejectOnConfirm = rejectOnConfirm;
-        this.status = "IN_PROGRESS";
+        this.status = Status.IN_PROGRESS;
     }
 
     String getOrderId() {
@@ -57,24 +62,24 @@ class FakePgPayment {
         return rejectOnConfirm;
     }
 
-    String getStatus() {
+    Status getStatus() {
         return status;
     }
 
     void abort() {
-        status = "ABORTED";
+        status = Status.ABORTED;
     }
 
     void approve(Instant at) {
-        status = "DONE";
+        status = Status.DONE;
         approvedAt = at;
     }
 
     void cancel() {
-        if ("DONE".equals(status)) status = "CANCELED";
+        if (status == Status.DONE) status = Status.CANCELED;
     }
 
     PaymentInfo info() {
-        return new PaymentInfo(paymentKey, orderId, status, amount, approvedAt);
+        return new PaymentInfo(paymentKey, orderId, status.name(), amount, approvedAt);
     }
 }
