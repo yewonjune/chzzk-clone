@@ -41,6 +41,14 @@ dependencies {
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
+// 실행 jar 는 build/libs/chichijik.jar 하나만 (이미지 빌드가 이름으로 바로 복사). 의존성 없는 plain jar 는 만들지 않음
+tasks.named('bootJar') {
+    archiveFileName = 'chichijik.jar'
+}
+tasks.named('jar') {
+    enabled = false
+}
+
 // 기본 테스트: Docker 없이 도는 단일 서버 테스트만
 tasks.named('test') {
     useJUnitPlatform {

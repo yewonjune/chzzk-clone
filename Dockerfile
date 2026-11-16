@@ -10,8 +10,9 @@ COPY gradlew settings.gradle build.gradle ./
 COPY gradle gradle
 RUN sed -i 's/\r$//' gradlew && chmod +x gradlew && ./gradlew --no-daemon -q dependencies > /dev/null
 COPY src src
-RUN ./gradlew --no-daemon -q bootJar -x test && cp build/libs/*[!n].jar /src/app.jar \
-    || cp build/libs/chichijik-*.jar /src/app.jar
+# 실행 jar 이름은 build.gradle 에서 chichijik.jar 로 고정 (빌드가 실패하면 여기서 멈춤)
+RUN ./gradlew --no-daemon -q bootJar -x test
+RUN cp build/libs/chichijik.jar /src/app.jar
 
 # ---- 2단계: 실행 ----
 FROM eclipse-temurin:17-jre
