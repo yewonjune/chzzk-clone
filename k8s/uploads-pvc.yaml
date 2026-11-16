@@ -4,8 +4,8 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: chichijik-uploads
-  namespace: chichijik
+  name: chzzk-uploads
+  namespace: chzzk
 spec:
   accessModes: ["ReadWriteOnce"]
   resources:

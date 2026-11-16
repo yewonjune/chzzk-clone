@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>치치직 - 로그인</title>
+  <title>치지직 - 로그인</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -52,7 +52,7 @@
       document.querySelectorAll('[data-signup]').forEach((el) => { el.hidden = m !== 'signup'; });
       $('submit').textContent = m === 'signup' ? '가입하고 로그인' : '로그인';
       $('password').autocomplete = m === 'signup' ? 'new-password' : 'current-password';
-      document.title = `치치직 - ${m === 'signup' ? '회원가입' : '로그인'}`;
+      document.title = `치지직 - ${m === 'signup' ? '회원가입' : '로그인'}`;
       $('error').textContent = '';
     }
     document.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));

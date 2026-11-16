@@ -1,9 +1,9 @@
-// 치치직 5단계: 오토스케일 확인용 k6 부하 스크립트
+// 치지직 5단계: 오토스케일 확인용 k6 부하 스크립트
 //
 // 실행 (설치 없이 Docker 로, 저장소 루트에서):
 //   docker run --rm -i -e BASE_URL=http://host.docker.internal:8080 grafana/k6:0.54.0 run - < load/autoscale.js
 // 다른 터미널에서 동시에:
-//   kubectl -n chichijik get hpa,pods -w
+//   kubectl -n chzzk get hpa,pods -w
 //
 // 시나리오
 //   load  : 비로그인 시청자들이 방송·다시보기 목록과 상세를 계속 조회해 CPU 부하를 만든다 (램프업 → 유지 → 종료)
@@ -80,7 +80,7 @@ export function setup() {
   const csrf = signup.json().csrf;
 
   // 다시보기 등록은 multipart 만 받음 (외부 영상 주소로 등록)
-  const boundary = '----chichijikload';
+  const boundary = '----chzzkload';
   const fields = { title: '오토스케일 확인용 다시보기', videoUrl: 'https://example.com/sample.mp4', durationSec: '60' };
   const form = Object.keys(fields)
     .map((k) => `--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${fields[k]}\r\n`)

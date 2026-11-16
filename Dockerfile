@@ -1,5 +1,5 @@
-# 치치직 서버 이미지 (5단계). 로컬 JDK 없이 Docker 만으로 빌드합니다.
-#   docker build -t chichijik:local .
+# 치지직 서버 이미지 (5단계). 로컬 JDK 없이 Docker 만으로 빌드합니다.
+#   docker build -t chzzk:local .
 # 실행 단계는 Java 17 JRE. 기본 프로필(H2·로컬 폴더)로도 뜨지만, 클러스터에서는 SPRING_PROFILES_ACTIVE=cluster 로 실행합니다.
 
 # ---- 1단계: bootJar 빌드 ----
@@ -10,18 +10,18 @@ COPY gradlew settings.gradle build.gradle ./
 COPY gradle gradle
 RUN sed -i 's/\r$//' gradlew && chmod +x gradlew && ./gradlew --no-daemon -q dependencies > /dev/null
 COPY src src
-# 실행 jar 이름은 build.gradle 에서 chichijik.jar 로 고정 (빌드가 실패하면 여기서 멈춤)
+# 실행 jar 이름은 build.gradle 에서 chzzk.jar 로 고정 (빌드가 실패하면 여기서 멈춤)
 RUN ./gradlew --no-daemon -q bootJar -x test
-RUN cp build/libs/chichijik.jar /src/app.jar
+RUN cp build/libs/chzzk.jar /src/app.jar
 
 # ---- 2단계: 실행 ----
 FROM eclipse-temurin:17-jre
 WORKDIR /app
-RUN useradd --system --uid 10001 --home-dir /app chichijik \
+RUN useradd --system --uid 10001 --home-dir /app chzzk \
     && mkdir -p /app/data /data/uploads \
-    && chown -R chichijik /app /data
+    && chown -R chzzk /app /data
 COPY --from=build /src/app.jar /app/app.jar
-USER chichijik
+USER chzzk
 ENV DATA_DIR=/app/data \
     JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError"
 EXPOSE 8080

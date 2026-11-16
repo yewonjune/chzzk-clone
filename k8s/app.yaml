@@ -1,16 +1,16 @@
-# 치치직 서버: cluster 프로필로 여러 개 (개수는 HPA 가 2~5개로 조정하므로 replicas 를 적지 않음)
-# 이미지: 로컬에서 만든 chichijik:local 을 그대로 사용 (docker build -t chichijik:local .)
+# 치지직 서버: cluster 프로필로 여러 개 (개수는 HPA 가 2~5개로 조정하므로 replicas 를 적지 않음)
+# 이미지: 로컬에서 만든 chzzk:local 을 그대로 사용 (docker build -t chzzk:local .)
 #         Docker Desktop Kubernetes 는 Docker 와 이미지 저장소를 같이 쓰므로 레지스트리 push 가 필요 없음.
-#         다시 빌드한 뒤에는 kubectl -n chichijik rollout restart deployment/chichijik
+#         다시 빌드한 뒤에는 kubectl -n chzzk rollout restart deployment/chzzk
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: chichijik
-  namespace: chichijik
+  name: chzzk
+  namespace: chzzk
 spec:
   selector:
     matchLabels:
-      app: chichijik
+      app: chzzk
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -19,7 +19,7 @@ spec:
   template:
     metadata:
       labels:
-        app: chichijik
+        app: chzzk
     spec:
       # 종료 순서: preStop 대기(5초) → SIGTERM → graceful shutdown(종료 단계 최대 90초) → 120초가 지나면 강제 종료
       terminationGracePeriodSeconds: 120
@@ -30,8 +30,8 @@ spec:
         # 업로드 공유 볼륨에 이미지의 실행 사용자(uid 10001)가 쓸 수 있도록
         fsGroup: 10001
       containers:
-        - name: chichijik
-          image: chichijik:local
+        - name: chzzk
+          image: chzzk:local
           # 로컬 이미지만 사용 (레지스트리에서 받지 않음). 빌드하지 않았으면 ErrImageNeverPull 로 바로 드러남
           imagePullPolicy: Never
           ports:
@@ -42,21 +42,21 @@ spec:
           # 비밀 값(DB 계정, Redis 비밀번호, SSL 키스토어 비밀번호, 토스 테스트 키 …): .env.cluster 로 만든 Secret
           envFrom:
             - secretRef:
-                name: chichijik-env
+                name: chzzk-env
           env:
             - name: SPRING_PROFILES_ACTIVE
               value: cluster
             - name: DB_URL
-              value: jdbc:postgresql://postgres:5432/chichijik
+              value: jdbc:postgresql://postgres:5432/chzzk
             - name: REDIS_HOST
               value: redis
             - name: REDIS_PORT
               value: "6379"
             - name: UPLOAD_DIR
               value: /data/uploads
-            # HTTPS(SSL_ENABLED=true)일 때 사용할 키스토어: Secret chichijik-tls 를 아래 볼륨으로 마운트
+            # HTTPS(SSL_ENABLED=true)일 때 사용할 키스토어: Secret chzzk-tls 를 아래 볼륨으로 마운트
             - name: SSL_KEYSTORE
-              value: /etc/chichijik/tls/keystore.p12
+              value: /etc/chzzk/tls/keystore.p12
             # probe 는 HTTPS 여부와 관계없이 별도 포트의 HTTP 로 (앱 포트가 HTTPS 여도 kubelet 이 그대로 확인)
             - name: MANAGEMENT_SERVER_PORT
               value: "8081"
@@ -92,15 +92,15 @@ spec:
             - name: uploads
               mountPath: /data/uploads
             - name: tls
-              mountPath: /etc/chichijik/tls
+              mountPath: /etc/chzzk/tls
               readOnly: true
       volumes:
         - name: uploads
           persistentVolumeClaim:
-            claimName: chichijik-uploads
+            claimName: chzzk-uploads
         - name: tls
           secret:
-            secretName: chichijik-tls
+            secretName: chzzk-tls
             # HTTP 로만 띄울 때는 이 Secret 을 만들지 않아도 됨
             optional: true
 ---
@@ -109,12 +109,12 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: chichijik
-  namespace: chichijik
+  name: chzzk
+  namespace: chzzk
 spec:
   type: LoadBalancer
   selector:
-    app: chichijik
+    app: chzzk
   ports:
     - name: http
       port: 8080

@@ -1,0 +1,196 @@
+package com.chzzk.broadcast;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
+import org.springframework.http.HttpStatus;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import com.chzzk.common.AfterCommit;
+import com.chzzk.common.ApiException;
+import com.chzzk.common.Ownership;
+import com.chzzk.user.LoginUser;
+import com.chzzk.user.User;
+import com.chzzk.user.UserRepository;
+
+@Service
+public class BroadcastService {
+
+    private static final Logger log = LoggerFactory.getLogger(BroadcastService.class);
+    private static final String NOT_FOUND = "방송을 찾을 수 없습니다.";
+    /** 방송을 시작하고 이 시간 안에 송출자 연결이 없으면 종료로 처리합니다. */
+    static final Duration HOST_CONNECT_GRACE = Duration.ofSeconds(30);
+
+    private final BroadcastRepository repository;
+    private final UserRepository users;
+    private final BroadcastLiveState liveState;
+    /** 재연결 유예: 송출 연결이 끊긴 뒤 이 시간 안에 돌아오지 않으면 종료합니다. 끊긴 시청자 자리도 이 시간 동안 남겨 둡니다. */
+    private final Duration reconnectGrace;
+    private final AtomicBoolean startupRecovered = new AtomicBoolean();
+
+    public BroadcastService(BroadcastRepository repository, UserRepository users, BroadcastLiveState liveState,
+                            @Value("${app.live.reconnect-grace}") Duration reconnectGrace) {
+        this.repository = repository;
+        this.users = users;
+        this.liveState = liveState;
+        this.reconnectGrace = reconnectGrace;
+    }
+
+    /** 방송 중을 먼저(최근 시작 순), 그다음 최근 종료된 방송 30개 */
+    @Transactional(readOnly = true)
+    public List<BroadcastResponse> list() {
+        List<BroadcastResponse> result = new ArrayList<>();
+        for (Broadcast b : repository.findAllByStatusOrderByStartedAtDesc(Broadcast.Status.LIVE)) {
+            result.add(BroadcastResponse.from(b, liveState.viewerCount(b.getId())));
+        }
+        for (Broadcast b : repository.findTop30ByStatusOrderByEndedAtDesc(Broadcast.Status.ENDED)) {
+            result.add(BroadcastResponse.from(b, 0));
+        }
+        return result;
+    }
+
+    @Transactional(readOnly = true)
+    public BroadcastResponse get(long id) {
+        return BroadcastResponse.from(find(id), liveState.viewerCount(id));
+    }
+
+    /** 방송 시작: 로그인 사용자가 소유자(스트리머)가 됩니다. */
+    @Transactional
+    public BroadcastResponse start(LoginUser me, String rawTitle) {
+        Ownership.requireLogin(me);
+        String title = validTitle(rawTitle);
+        User owner = users.findById(me.id()).orElseThrow(() -> ApiException.notFound("사용자를 찾을 수 없습니다."));
+        Broadcast b = repository.save(new Broadcast(owner, title, Instant.now()));
+        return BroadcastResponse.from(b, 0);
+    }
+
+    /** 제목 수정: 소유자만. 방송 중이면 시청자 화면에도 바로 반영 */
+    @Transactional
+    public BroadcastResponse rename(long id, LoginUser me, String rawTitle) {
+        Broadcast b = find(id);
+        Ownership.requireOwner(b.getOwner(), me, "이 방송을 수정할 권한이 없습니다.");
+        String title = validTitle(rawTitle);
+        b.rename(title);
+        if (b.isLive()) AfterCommit.run(() -> liveState.sendToAll(id, SignalingMessages.title(title)));
+        return BroadcastResponse.from(b, liveState.viewerCount(id));
+    }
+
+    /** 종료: 소유자만. 이미 종료됐으면 그대로 성공 */
+    @Transactional
+    public BroadcastResponse end(long id, LoginUser me) {
+        Broadcast b = find(id);
+        Ownership.requireOwner(b.getOwner(), me, "이 방송을 종료할 권한이 없습니다.");
+        endIfLive(id);
+        return BroadcastResponse.from(find(id), 0);
+    }
+
+    /** 기록 삭제: 소유자만, 종료된 방송만. 댓글은 DB에서 함께 삭제(ON DELETE CASCADE) */
+    @Transactional
+    public void delete(long id, LoginUser me) {
+        Broadcast b = find(id);
+        Ownership.requireOwner(b.getOwner(), me, "이 방송을 삭제할 권한이 없습니다.");
+        if (b.isLive()) throw new ApiException(HttpStatus.CONFLICT, "방송 중에는 삭제할 수 없습니다. 먼저 방송을 종료해 주세요.");
+        repository.delete(b);
+    }
+
+    /** 송출자 연결 허용 여부: 방송 중이고, 연결한 사용자가 소유자일 때만 */
+    @Transactional(readOnly = true)
+    public boolean canHost(long id, LoginUser me) {
+        return repository.findWithOwnerById(id)
+                .filter(Broadcast::isLive)
+                .filter(b -> Ownership.isOwner(b.getOwner(), me))
+                .isPresent();
+    }
+
+    @Transactional(readOnly = true)
+    public boolean isLive(long id) {
+        return repository.findById(id).map(Broadcast::isLive).orElse(false);
+    }
+
+    /**
+     * 정리 작업. 방송 중인 방송 중 다음 두 경우를 종료합니다.
+     * ① 시작 후 30초 동안 송출 연결이 한 번도 없었던 방송 (시작만 하고 바로 창을 닫는 등)
+     * ② 송출 연결이 끊긴 지 재연결 유예가 지난 방송
+     * 재연결 유예가 지난 끊긴 시청자도 퇴장 처리합니다.
+     * 그 전에 하트비트가 사라진 서버 소속 기록을 정리합니다(송출자는 끊김으로 바뀌어 ②의 유예를 받음).
+     * 종료는 조건부 갱신이라 여러 곳에서 동시에 돌아도 종료 알림은 한 번만 나갑니다.
+     */
+    @Scheduled(fixedDelayString = "${app.live.sweep-interval-ms}", initialDelayString = "${app.live.sweep-interval-ms}")
+    @Transactional
+    public void sweep() {
+        recoverLiveBroadcastsOnStartup();
+        Instant now = Instant.now();
+        Instant neverConnectedCutoff = now.minus(HOST_CONNECT_GRACE);
+        Instant graceCutoff = now.minus(reconnectGrace);
+        for (Broadcast b : repository.findAllByStatusOrderByStartedAtDesc(Broadcast.Status.LIVE)) {
+            long id = b.getId();
+            liveState.releaseDeadInstances(id);
+            if (liveState.hasHost(id)) {
+                liveState.dropViewersDisconnectedBefore(id, graceCutoff);
+                continue;
+            }
+            var disconnectedAt = liveState.hostDisconnectedAt(id);
+            if (disconnectedAt.isPresent()) {
+                if (disconnectedAt.get().isBefore(graceCutoff)) {
+                    log.info("송출 연결이 끊긴 뒤 재연결 유예가 지난 방송 {} 종료", id);
+                    endIfLive(id);
+                    continue;
+                }
+            } else if (b.getStartedAt().isBefore(neverConnectedCutoff)) {
+                log.info("송출 연결이 한 번도 없었던 방송 {} 종료", id);
+                endIfLive(id);
+                continue;
+            }
+            liveState.dropViewersDisconnectedBefore(id, graceCutoff);
+        }
+    }
+
+    /**
+     * 서버가 뜰 때 방송 중인 방송을 종료하지 않습니다(재시작이 방송 종료가 되지 않도록).
+     * 재시작으로 송출자 기록을 잃은 방송은 송출 화면이 재연결 유예 안에 돌아오지 않을 때만 종료됩니다.
+     * 기록을 서버 밖에 두는 cluster 프로필에서는 서버가 하나 더 떠도 어떤 방송의 결과도 바뀌지 않습니다
+     * ({@link BroadcastLiveState#recoverAfterRestart}).
+     * 첫 정리 작업 전에 끝나도록 정리 작업도 처음 한 번 이 작업을 먼저 합니다.
+     */
+    @EventListener(ApplicationReadyEvent.class)
+    @Transactional(readOnly = true)
+    public void recoverLiveBroadcastsOnStartup() {
+        if (startupRecovered.getAndSet(true)) return;
+        Instant now = Instant.now();
+        for (Broadcast b : repository.findAllByStatusOrderByStartedAtDesc(Broadcast.Status.LIVE)) {
+            liveState.recoverAfterRestart(b.getId(), now);
+        }
+    }
+
+    /**
+     * 방송 중일 때만 종료로 바꾸는 조건부 갱신. 실제로 바꾼 쪽만 종료 알림을 보내므로
+     * 같은 방송을 여러 곳에서 동시에 종료해도 ended 는 한 번만 나갑니다.
+     * 알림은 종료 기록이 DB에 커밋된 뒤에 보냅니다.
+     * (커밋 전에 보내면 클라이언트가 곧바로 다시 조회했을 때 아직 방송 중으로 보입니다.)
+     */
+    private void endIfLive(long id) {
+        if (repository.endIfLive(id, Instant.now()) == 0) return;
+        AfterCommit.run(() -> liveState.ended(id));
+    }
+
+    private static String validTitle(String raw) {
+        String title = raw == null ? "" : raw.trim();
+        if (title.isEmpty()) throw ApiException.badRequest("방송 제목을 입력해 주세요.");
+        if (title.length() > 100) throw ApiException.badRequest("방송 제목은 100자 이하로 입력해 주세요.");
+        return title;
+    }
+
+    private Broadcast find(long id) {
+        return repository.findWithOwnerById(id).orElseThrow(() -> ApiException.notFound(NOT_FOUND));
+    }
+}

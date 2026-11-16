@@ -1,4 +1,4 @@
-# 치치직 (ChiChiJik)
+# 치지직 (Chzzk)
 
 **휴대폰으로 라이브 방송을 하고**, 방송과 **녹화 영상(다시보기)을 시청**하며, 로그인한 사용자가 **댓글**을 달고 스트리머에게 **후원(도네이션)** 하는 스트리밍 사이트입니다.
 
@@ -30,7 +30,7 @@
 
 1. `File → Open` 으로 이 폴더(`build.gradle`이 있는 폴더)를 엽니다. Gradle 프로젝트로 자동 인식됩니다.
 2. `File → Project Structure → SDK` 에서 JDK 17 이상을 선택합니다.
-3. `src/main/java/com/chichijik/ChichijikApplication.java` 의 ▶ 버튼으로 실행합니다.
+3. `src/main/java/com/chzzk/ChzzkApplication.java` 의 ▶ 버튼으로 실행합니다.
 4. 브라우저에서 http://localhost:8080 접속 → 오른쪽 위 **로그인 → 회원가입**.
 
 휴대폰 송출까지 하려면 아래 [휴대폰으로 송출하기](#휴대폰으로-송출하기)처럼 HTTPS를 켜야 합니다.
@@ -46,8 +46,8 @@
 | `./gradlew bootRun` | 서버 실행 |
 | `./gradlew test` | 자동 테스트 21개 (도네이션 결제 흐름 · 권한 매트릭스 · 다시보기 흐름 · 방송 흐름 · 상태 확인), Docker 불필요 |
 | `./gradlew clusterTest` | 서버 2대 테스트 17개 (Testcontainers 로 PostgreSQL·Redis, **Docker 필요**) |
-| `./gradlew bootJar` | 실행 jar 생성 → `java -jar build/libs/chichijik.jar` |
-| `docker build -t chichijik:local .` | 컨테이너 이미지 (JDK 설치 없이 Docker 만으로 빌드) |
+| `./gradlew bootJar` | 실행 jar 생성 → `java -jar build/libs/chzzk.jar` |
+| `docker build -t chzzk:local .` | 컨테이너 이미지 (JDK 설치 없이 Docker 만으로 빌드) |
 
 > 계정은 처음에 하나도 없습니다. 회원가입 화면에서 직접 만드세요(관리자·기본 계정·기본 비밀번호 없음).
 
@@ -59,7 +59,7 @@ Spring Boot는 `.env` 파일을 자동으로 읽지 않으므로, IntelliJ에서
 ```dotenv
 # 공통
 PORT=8080                       # 서버 포트
-DATA_DIR=./data                 # H2 DB 파일(chichijik.mv.db) 저장 폴더
+DATA_DIR=./data                 # H2 DB 파일(chzzk.mv.db) 저장 폴더
 UPLOAD_DIR=./data/uploads       # 업로드된 다시보기 영상 저장 폴더
 MAX_UPLOAD_SIZE=1GB             # 다시보기 업로드 최대 크기
 
@@ -68,7 +68,7 @@ SESSION_TIMEOUT=12h             # 마지막 요청 이후 로그인 유지 시�
 
 # HTTPS (휴대폰 카메라·마이크 사용에 필요, 켜면 세션 쿠키도 HTTPS 전용)
 SSL_ENABLED=false
-SSL_KEYSTORE=./certs/chichijik.p12
+SSL_KEYSTORE=./certs/chzzk.p12
 SSL_KEYSTORE_PASSWORD=<keytool 로 만들 때 정한 비밀번호>
 
 # 방송(WebRTC)
@@ -94,8 +94,8 @@ SHUTDOWN_PHASE_TIMEOUT=90s      # 종료 신호를 받은 뒤 진행 중인 요�
 **`cluster` 프로필** (`SPRING_PROFILES_ACTIVE=cluster`, Kubernetes 에서는 `k8s/app.yaml` 이 설정)에서만 쓰는 값입니다. 빠지면 서버가 시작하지 않습니다.
 
 ```dotenv
-DB_URL=jdbc:postgresql://postgres:5432/chichijik
-DB_USERNAME=chichijik
+DB_URL=jdbc:postgresql://postgres:5432/chzzk
+DB_USERNAME=chzzk
 DB_PASSWORD=<직접 정한 값>
 REDIS_HOST=redis
 REDIS_PORT=6379                 # 기본 6379
@@ -126,7 +126,7 @@ kubectl -n kube-system patch deployment metrics-server --type=json -p '[{"op":"a
 **2) 이미지 빌드** (Docker Desktop Kubernetes 는 로컬 이미지를 그대로 씁니다. 레지스트리 불필요)
 
 ```bash
-docker build -t chichijik:local .
+docker build -t chzzk:local .
 ```
 
 **3) 비밀 값 Secret** — 예시를 복사해 `DB_PASSWORD` 등을 직접 정한 값으로 바꿉니다. `.env.cluster` 는 git 에서 제외되어 있습니다.
@@ -134,22 +134,22 @@ docker build -t chichijik:local .
 ```bash
 cp .env.cluster.example .env.cluster
 kubectl apply -f k8s/00-namespace.yaml
-kubectl -n chichijik create secret generic chichijik-env --from-env-file=.env.cluster
+kubectl -n chzzk create secret generic chzzk-env --from-env-file=.env.cluster
 ```
 
 **4) 배포**
 
 ```bash
 kubectl apply -f k8s/
-kubectl -n chichijik rollout status deploy/chichijik
-kubectl -n chichijik get pods,svc,hpa
+kubectl -n chzzk rollout status deploy/chzzk
+kubectl -n chzzk get pods,svc,hpa
 ```
 
 서버 Pod 2개가 `Running 1/1`, HPA `TARGETS` 가 `cpu: 3%/50%` 처럼 숫자로 보이면 준비된 것입니다(지표는 1분쯤 걸림). 브라우저에서 http://localhost:8080 으로 접속합니다.
 
-- 휴대폰으로 송출하려면 HTTPS 가 필요합니다: 아래 [휴대폰으로 송출하기](#휴대폰으로-송출하기)처럼 키스토어를 만든 뒤 `kubectl -n chichijik create secret generic chichijik-tls --from-file=keystore.p12=certs/chichijik.p12`, `.env.cluster` 에 `SSL_ENABLED=true`·`SSL_KEYSTORE_PASSWORD` 를 넣고 Secret 을 다시 만든 다음 `kubectl -n chichijik rollout restart deployment/chichijik`. 휴대폰에서는 `https://<PC IP>:8080` (Windows 방화벽에서 8080 허용).
-- 코드를 바꾼 뒤: 2) 의 이미지 빌드 → `kubectl -n chichijik rollout restart deployment/chichijik`
-- 전부 지우기(DB·업로드 데이터 포함): `kubectl delete namespace chichijik`
+- 휴대폰으로 송출하려면 HTTPS 가 필요합니다: 아래 [휴대폰으로 송출하기](#휴대폰으로-송출하기)처럼 키스토어를 만든 뒤 `kubectl -n chzzk create secret generic chzzk-tls --from-file=keystore.p12=certs/chzzk.p12`, `.env.cluster` 에 `SSL_ENABLED=true`·`SSL_KEYSTORE_PASSWORD` 를 넣고 Secret 을 다시 만든 다음 `kubectl -n chzzk rollout restart deployment/chzzk`. 휴대폰에서는 `https://<PC IP>:8080` (Windows 방화벽에서 8080 허용).
+- 코드를 바꾼 뒤: 2) 의 이미지 빌드 → `kubectl -n chzzk rollout restart deployment/chzzk`
+- 전부 지우기(DB·업로드 데이터 포함): `kubectl delete namespace chzzk`
 
 ## 공개 범위와 권한
 
@@ -245,22 +245,22 @@ PC IP 확인: Windows `ipconfig` (Wi-Fi 어댑터의 IPv4 주소) / macOS `ipcon
 
 ```bash
 mkdir certs
-keytool -genkeypair -alias chichijik -keyalg RSA -keysize 2048 -validity 365 -storetype PKCS12 -keystore certs/chichijik.p12 -dname "CN=chichijik" -ext "SAN=dns:localhost,ip:127.0.0.1,ip:192.168.0.10"
+keytool -genkeypair -alias chzzk -keyalg RSA -keysize 2048 -validity 365 -storetype PKCS12 -keystore certs/chzzk.p12 -dname "CN=chzzk" -ext "SAN=dns:localhost,ip:127.0.0.1,ip:192.168.0.10"
 ```
 
 비밀번호를 물으면 원하는 값을 입력합니다(이 값은 저장소에 올리지 마세요. `certs/`는 git에서 제외됨). 그다음 환경변수를 넣고 실행합니다.
 
 ```bash
 # macOS / Linux / Git Bash
-PORT=8443 SSL_ENABLED=true SSL_KEYSTORE=certs/chichijik.p12 SSL_KEYSTORE_PASSWORD=<비밀번호> ./gradlew bootRun
+PORT=8443 SSL_ENABLED=true SSL_KEYSTORE=certs/chzzk.p12 SSL_KEYSTORE_PASSWORD=<비밀번호> ./gradlew bootRun
 ```
 
 ```powershell
 # Windows PowerShell
-$env:PORT="8443"; $env:SSL_ENABLED="true"; $env:SSL_KEYSTORE="certs/chichijik.p12"; $env:SSL_KEYSTORE_PASSWORD="<비밀번호>"; .\gradlew.bat bootRun
+$env:PORT="8443"; $env:SSL_ENABLED="true"; $env:SSL_KEYSTORE="certs/chzzk.p12"; $env:SSL_KEYSTORE_PASSWORD="<비밀번호>"; .\gradlew.bat bootRun
 ```
 
-IntelliJ라면 Run Configuration의 Environment variables에 `PORT=8443;SSL_ENABLED=true;SSL_KEYSTORE=certs/chichijik.p12;SSL_KEYSTORE_PASSWORD=<비밀번호>`를 넣습니다.
+IntelliJ라면 Run Configuration의 Environment variables에 `PORT=8443;SSL_ENABLED=true;SSL_KEYSTORE=certs/chzzk.p12;SSL_KEYSTORE_PASSWORD=<비밀번호>`를 넣습니다.
 
 - 접속 주소: 휴대폰·PC 모두 `https://192.168.0.10:8443`
 - 처음 접속하면 **"연결이 비공개로 설정되어 있지 않습니다 / 안전하지 않음"** 경고가 뜹니다. 자체 서명 인증서라서 정상입니다.
@@ -302,7 +302,7 @@ cloudflared tunnel --url http://localhost:8080
 
 1. 터미널 1에서 Pod 수를 지켜봅니다.
    ```bash
-   kubectl -n chichijik get hpa,pods -w
+   kubectl -n chzzk get hpa,pods -w
    ```
 2. 터미널 2에서 k6 로 부하를 겁니다(설치 없이 Docker 이미지로, 약 10분).
    ```bash
@@ -318,7 +318,7 @@ cloudflared tunnel --url http://localhost:8080
 
 **실제로 확인한 결과** (Docker Desktop Kubernetes v1.36, 노드 1개 16 CPU / 2026-11-16)
 
-15초마다 `kubectl -n chichijik get hpa` 와 서버 Pod 목록을 찍은 기록에서 옮겼습니다(Pod 이름 앞부분 `chichijik-5c7dfc895c-` 생략).
+15초마다 `kubectl -n chzzk get hpa` 와 서버 Pod 목록을 찍은 기록에서 옮겼습니다(Pod 이름 앞부분 `chzzk-5c7dfc895c-` 생략).
 
 ```text
 시각      HPA TARGETS     REPLICAS  서버 Pod
@@ -333,7 +333,7 @@ cloudflared tunnel --url http://localhost:8080
 ```
 
 ```text
-$ kubectl -n chichijik describe hpa chichijik   (Events 일부)
+$ kubectl -n chzzk describe hpa chzzk   (Events 일부)
   Normal  SuccessfulRescale  New size: 5; reason: cpu resource utilization (percentage of request) above target
   Normal  SuccessfulRescale  New size: 2; reason: All metrics below target
 ```
@@ -580,8 +580,8 @@ watch ✓ [ 100% ] 1 VUs      10m0s
 ## 폴더 구조
 
 ```
-src/main/java/com/chichijik/
-  ChichijikApplication.java     진입점
+src/main/java/com/chzzk/
+  ChzzkApplication.java     진입점
   user/                         사용자: 엔티티·가입·로그인(AuthController)·세션 사용자(LoginUser)
   broadcast/                    방송: 엔티티·서비스(소유자 검사, 재연결 유예 정리)·컨트롤러, WebSocket 시그널링,
                                 방송 실시간 상태(BroadcastLiveState: 메모리 / Redis 구현)

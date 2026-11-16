@@ -5,17 +5,17 @@
 #   Docker Desktop 의 kubelet 인증서는 자체 서명이라 --kubelet-insecure-tls 를 추가해야 지표가 수집됨:
 #   kubectl -n kube-system patch deployment metrics-server --type=json \
 #     -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
-#   확인: kubectl top pods -n chichijik   (1분쯤 뒤 값이 나오면 kubectl get hpa 의 TARGETS 도 <unknown> 이 아님)
+#   확인: kubectl top pods -n chzzk   (1분쯤 뒤 값이 나오면 kubectl get hpa 의 TARGETS 도 <unknown> 이 아님)
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: chichijik
-  namespace: chichijik
+  name: chzzk
+  namespace: chzzk
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: chichijik
+    name: chzzk
   minReplicas: 2
   maxReplicas: 5
   metrics:

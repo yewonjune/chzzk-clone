@@ -1,4 +1,4 @@
-# 치치직 5단계 설계 문서
+# 치지직 5단계 설계 문서
 
 > 범위: 1~4단계 서비스를 **로컬 Kubernetes(Docker Desktop)** 에서 여러 인스턴스로 띄우고, CPU 사용률에 따라 **2~5개 사이로 자동 확장·축소**한다. 인스턴스가 늘고 줄어도 로그인 세션·업로드 영상·방송(라이브) 상태·댓글·후원이 유지되도록 상태를 모두 인스턴스 밖에 둔다.
 > 1~4단계 기능은 유지하고, `gradlew bootRun` 단일 인스턴스 실행도 그대로 지원한다.
@@ -11,15 +11,15 @@
 ### 1-1. 전체 구조
 
 ```
- 브라우저·휴대폰                         Docker Desktop Kubernetes (namespace chichijik)
+ 브라우저·휴대폰                         Docker Desktop Kubernetes (namespace chzzk)
  ─────────────                         ────────────────────────────────────────────────────────────────
- http(s)://localhost:8080 ──▶ Service chichijik (LoadBalancer) ──┬─▶ Pod chichijik #1 ┐
- /ws/broadcasts/{id}                                             ├─▶ Pod chichijik #2 │  HPA: 2~5개
+ http(s)://localhost:8080 ──▶ Service chzzk (LoadBalancer) ──┬─▶ Pod chzzk #1 ┐
+ /ws/broadcasts/{id}                                             ├─▶ Pod chzzk #2 │  HPA: 2~5개
                                                                  └─▶ … #5             ┘  CPU 50% 목표
                                                                         │   │   │
                          ┌──────────────────────────────────────────────┘   │   └──────────────────────┐
                          ▼                                                  ▼                          ▼
-              PostgreSQL (StatefulSet+PVC)                    Redis (Deployment)              PVC chichijik-uploads
+              PostgreSQL (StatefulSet+PVC)                    Redis (Deployment)              PVC chzzk-uploads
               사용자·방송·다시보기·댓글·후원 주문,           로그인 세션(Spring Session),       업로드 영상 (/data/uploads)
               가짜 PG 결제 기록                              방송 실시간 상태, pub/sub 중계,     모든 Pod 가 같이 마운트
                                                              인스턴스 하트비트
@@ -28,7 +28,7 @@
 | 상태 | 1~4단계 | 5단계 cluster 프로필 |
 | --- | --- | --- |
 | 사용자·방송·다시보기·댓글·후원 | H2 파일 DB | **PostgreSQL** |
-| 로그인 세션·CSRF 토큰 | Tomcat 메모리 세션 | **Redis** (Spring Session, `chichijik:session`) |
+| 로그인 세션·CSRF 토큰 | Tomcat 메모리 세션 | **Redis** (Spring Session, `chzzk:session`) |
 | 업로드 영상 | 로컬 폴더 | **공유 PVC** (`UPLOAD_DIR=/data/uploads`) |
 | 가짜 PG 결제 | 메모리 Map | **PostgreSQL** `fake_pg_payments` |
 | 송출자·시청자 연결 정보, 시청자 수 | 인스턴스 메모리 (`LiveRooms`) | **Redis** + 인스턴스별 WebSocket |
@@ -49,14 +49,14 @@ SignalingMessages   ── 서버가 보내는 시그널링 메시지를 한 곳
 
 서비스는 어느 구현인지 모릅니다. Redis 구현에서 각 인스턴스는 **자기에게 붙은 WebSocket만** 메모리에 들고, 나머지는 Redis에 둡니다.
 
-| Redis 키 (`chichijik:live:` 아래) | 내용 |
+| Redis 키 (`chzzk:live:` 아래) | 내용 |
 | --- | --- |
 | `{id}:host` (hash) | 송출자 연결: 소속 인스턴스, 연결 토큰, 끊긴 시각 |
 | `{id}:viewers` (hash) | viewerId → 소속 인스턴스 (시청자 수 = 개수) |
 | `{id}:viewers-disconnected` (hash) | 비정상으로 끊긴 시청자의 끊긴 시각 (재연결 유예용) |
 | `{id}:ended` (TTL 1시간) | 종료 표시. 종료와 동시에 들어온 입장·송출 연결을 거절 |
 | `{id}` (pub/sub 채널) | 방송 메시지 봉투 `Envelope(kind, viewerId, hostToken, message)` |
-| `chichijik:instance:{instanceId}` (TTL 15초) | 인스턴스 하트비트 (5초마다 갱신) |
+| `chzzk:instance:{instanceId}` (TTL 15초) | 인스턴스 하트비트 (5초마다 갱신) |
 
 입장·퇴장·송출자 교체·종료는 **Lua 스크립트 한 번**으로 원자적으로 처리합니다. 예를 들어 입장은 "종료되지 않았고 상한 미만이면 추가하고, 새 시청자 수를 채널에 발행"이 한 번에 일어나므로, 서버 A·B로 동시에 12명이 들어와도 상한(3명)을 넘지 않습니다.
 
@@ -100,17 +100,17 @@ Pod A 강제 종료 (OOM, kill -9)
 
 | 파일 | 내용 |
 | --- | --- |
-| `00-namespace.yaml` | 네임스페이스 `chichijik`, 머리말에 적용 순서 |
-| `postgres.yaml` | PostgreSQL 16 StatefulSet + 2Gi PVC, 계정은 Secret `chichijik-env` 의 `DB_USERNAME`/`DB_PASSWORD` |
+| `00-namespace.yaml` | 네임스페이스 `chzzk`, 머리말에 적용 순서 |
+| `postgres.yaml` | PostgreSQL 16 StatefulSet + 2Gi PVC, 계정은 Secret `chzzk-env` 의 `DB_USERNAME`/`DB_PASSWORD` |
 | `redis.yaml` | Redis 7 (디스크 저장 없음, `REDIS_PASSWORD` 가 있으면 비밀번호 사용) |
 | `uploads-pvc.yaml` | 업로드 영상 5Gi PVC. ReadWriteOnce 지만 Docker Desktop 은 노드가 하나라 모든 Pod 가 함께 마운트 |
 | `app.yaml` | 서버 Deployment(`cluster` 프로필, CPU 요청 250m / 상한 500m, 종료 유예 120초, preStop 5초, startup·liveness·readiness probe) + LoadBalancer Service(8080) |
 | `hpa.yaml` | HPA: 최소 2, 최대 5, 평균 CPU 50%, 축소 안정화 60초 |
 
-- 이미지: 멀티스테이지 `Dockerfile` (JDK 17 에서 `bootJar` → JRE 17, uid 10001). `imagePullPolicy: Never` 로 로컬 이미지 `chichijik:local` 만 사용.
+- 이미지: 멀티스테이지 `Dockerfile` (JDK 17 에서 `bootJar` → JRE 17, uid 10001). `imagePullPolicy: Never` 로 로컬 이미지 `chzzk:local` 만 사용.
 - probe 는 별도 포트 8081(HTTP)의 Actuator health. readiness 는 DB·Redis 연결을 포함하므로 Redis 가 멈추면 그 Pod 로 요청이 가지 않음.
 - `enableServiceLinks: false`: Kubernetes 가 Service 마다 넣는 `REDIS_PORT=tcp://…` 환경변수가 앱의 `REDIS_PORT` 를 덮어써 기동에 실패하는 것을 막음 (실제 배포에서 발견).
-- 비밀 값: `.env.cluster.example` 만 저장소에 있고, 실제 `.env.cluster` 는 git 제외. `kubectl create secret generic chichijik-env --from-env-file=.env.cluster`.
+- 비밀 값: `.env.cluster.example` 만 저장소에 있고, 실제 `.env.cluster` 는 git 제외. `kubectl create secret generic chzzk-env --from-env-file=.env.cluster`.
 
 ---
 

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>치치직 - 방송 시작</title>
+  <title>치지직 - 방송 시작</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -157,7 +157,7 @@
 
     function goLive() {
       s.live = true;
-      document.title = `🔴 ${s.broadcast.title} - 치치직`;
+      document.title = `🔴 ${s.broadcast.title} - 치지직`;
       $('heading').textContent = s.broadcast.title;
       $('setup').hidden = true;
       $('live-controls').hidden = false;
@@ -270,7 +270,7 @@
       setConnNote('');
       s.stream?.getTracks().forEach((t) => t.stop());
       s.wakeLock?.release().catch(() => {});
-      document.title = '치치직 - 방송 종료';
+      document.title = '치지직 - 방송 종료';
       $('live-controls').hidden = true;
       $('hud').hidden = true;
       if (s.broadcast) $('ended-link').href = `/live.html?id=${s.broadcast.id}`;

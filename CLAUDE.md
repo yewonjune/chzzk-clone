@@ -1,4 +1,4 @@
-# 치치직 (chzzk-clone)
+# 치지직 (chzzk-clone)
 
 ## Agent skills
 

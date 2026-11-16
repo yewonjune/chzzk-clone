@@ -1,10 +1,10 @@
 # 기록(사용자·방송·다시보기·댓글·후원·가짜 PG 결제): PostgreSQL 1대, 데이터는 PVC 에 보존
-# 계정·비밀번호는 Secret chichijik-env 의 DB_USERNAME / DB_PASSWORD (서버와 같은 값)
+# 계정·비밀번호는 Secret chzzk-env 의 DB_USERNAME / DB_PASSWORD (서버와 같은 값)
 apiVersion: v1
 kind: Service
 metadata:
   name: postgres
-  namespace: chichijik
+  namespace: chzzk
 spec:
   clusterIP: None
   selector:
@@ -17,7 +17,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: postgres
-  namespace: chichijik
+  namespace: chzzk
 spec:
   serviceName: postgres
   replicas: 1
@@ -37,19 +37,19 @@ spec:
               containerPort: 5432
           env:
             - name: POSTGRES_DB
-              value: chichijik
+              value: chzzk
             - name: POSTGRES_USER
               valueFrom:
-                secretKeyRef: { name: chichijik-env, key: DB_USERNAME }
+                secretKeyRef: { name: chzzk-env, key: DB_USERNAME }
             - name: POSTGRES_PASSWORD
               valueFrom:
-                secretKeyRef: { name: chichijik-env, key: DB_PASSWORD }
+                secretKeyRef: { name: chzzk-env, key: DB_PASSWORD }
             # 볼륨 루트가 아닌 하위 폴더에 (볼륨에 lost+found 등이 있어도 initdb 가능)
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
           readinessProbe:
             exec:
-              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d chichijik"]
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d chzzk"]
             periodSeconds: 5
           resources:
             requests: { cpu: 100m, memory: 256Mi }
