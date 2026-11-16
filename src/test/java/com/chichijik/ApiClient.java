@@ -19,6 +19,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import org.springframework.boot.builder.SpringApplicationBuilder;
@@ -38,14 +39,33 @@ final class ApiClient {
     static final Duration WAIT = Duration.ofSeconds(5);
 
     final String base;
-    final CookieManager cookies = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
-    final HttpClient http = HttpClient.newBuilder().cookieHandler(cookies).build();
+    final CookieManager cookies;
+    final HttpClient http;
     private String csrfHeader;
     private String csrfToken;
     JsonNode user;
 
     private ApiClient(String base) {
         this.base = base;
+        this.cookies = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
+        this.http = HttpClient.newBuilder().cookieHandler(cookies).build();
+    }
+
+    private ApiClient(String base, ApiClient same) {
+        this.base = base;
+        this.cookies = same.cookies;
+        this.http = same.http;
+        this.csrfHeader = same.csrfHeader;
+        this.csrfToken = same.csrfToken;
+        this.user = same.user;
+    }
+
+    /**
+     * 같은 브라우저(같은 쿠키·CSRF 토큰)가 로드밸런서 뒤의 다른 서버로 보내는 요청.
+     * 쿠키는 포트를 구분하지 않으므로 localhost 의 A·B 서버에 같은 세션 쿠키가 실립니다.
+     */
+    ApiClient on(String otherBase) {
+        return new ApiClient(otherBase, this);
     }
 
     // ---- 서버 기동 ----
@@ -196,6 +216,27 @@ final class ApiClient {
                 if (m != null && type.equals(m.get("type").asString())) return m;
             }
             throw new AssertionError("메시지를 받지 못함: " + type);
+        }
+
+        /** type 이 같고 조건에 맞는 메시지가 올 때까지 기다림 (중간에 온 다른 값은 건너뜀) */
+        JsonNode nextWhere(String type, Predicate<JsonNode> condition) throws InterruptedException {
+            long deadline = System.nanoTime() + WAIT.toNanos();
+            while (System.nanoTime() < deadline) {
+                JsonNode m = inbox.poll(50, TimeUnit.MILLISECONDS);
+                if (m != null && type.equals(m.get("type").asString()) && condition.test(m)) return m;
+            }
+            throw new AssertionError("조건에 맞는 메시지를 받지 못함: " + type);
+        }
+
+        /** 지금부터 잠시 기다리는 동안 type 메시지가 몇 개 더 오는지 */
+        int countWithin(String type, Duration wait) throws InterruptedException {
+            int n = 0;
+            long deadline = System.nanoTime() + wait.toNanos();
+            while (System.nanoTime() < deadline) {
+                JsonNode m = inbox.poll(50, TimeUnit.MILLISECONDS);
+                if (m != null && type.equals(m.get("type").asString())) n++;
+            }
+            return n;
         }
 
         void close() {
