@@ -5,9 +5,11 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.http.HttpStatus;
@@ -33,11 +35,16 @@ public class BroadcastService {
     private final BroadcastRepository repository;
     private final UserRepository users;
     private final BroadcastLiveState liveState;
+    /** 재연결 유예: 송출 연결이 끊긴 뒤 이 시간 안에 돌아오지 않으면 종료합니다. 끊긴 시청자 자리도 이 시간 동안 남겨 둡니다. */
+    private final Duration reconnectGrace;
+    private final AtomicBoolean startupGraceGiven = new AtomicBoolean();
 
-    public BroadcastService(BroadcastRepository repository, UserRepository users, BroadcastLiveState liveState) {
+    public BroadcastService(BroadcastRepository repository, UserRepository users, BroadcastLiveState liveState,
+                            @Value("${app.live.reconnect-grace:20s}") Duration reconnectGrace) {
         this.repository = repository;
         this.users = users;
         this.liveState = liveState;
+        this.reconnectGrace = reconnectGrace;
     }
 
     /** 방송 중을 먼저(최근 시작 순), 그다음 최근 종료된 방송 30개 */
@@ -111,31 +118,55 @@ public class BroadcastService {
         return repository.findById(id).map(Broadcast::isLive).orElse(false);
     }
 
-    /** 송출자 연결이 끊기면 즉시 종료합니다. */
+    /**
+     * 정리 작업. 방송 중인 방송 중 다음 두 경우를 종료합니다.
+     * ① 시작 후 30초 동안 송출 연결이 한 번도 없었던 방송 (시작만 하고 바로 창을 닫는 등)
+     * ② 송출 연결이 끊긴 지 재연결 유예가 지난 방송
+     * 재연결 유예가 지난 끊긴 시청자도 퇴장 처리합니다.
+     * 종료는 조건부 갱신이라 여러 곳에서 동시에 돌아도 종료 알림은 한 번만 나갑니다.
+     */
+    @Scheduled(fixedDelayString = "${app.live.sweep-interval-ms:10000}", initialDelayString = "${app.live.sweep-interval-ms:10000}")
     @Transactional
-    public void endBecauseHostLeft(long id) {
-        endIfLive(id);
-    }
-
-    /** 방송을 시작만 하고 송출 화면이 연결되지 않은 경우(바로 창을 닫는 등)를 정리합니다. */
-    @Scheduled(fixedDelay = 10_000, initialDelay = 10_000)
-    @Transactional
-    public void endOrphans() {
-        Instant cutoff = Instant.now().minus(HOST_CONNECT_GRACE);
+    public void sweep() {
+        giveGraceToLiveBroadcastsOnStartup();
+        Instant now = Instant.now();
+        Instant neverConnectedCutoff = now.minus(HOST_CONNECT_GRACE);
+        Instant graceCutoff = now.minus(reconnectGrace);
         for (Broadcast b : repository.findAllByStatusOrderByStartedAtDesc(Broadcast.Status.LIVE)) {
-            if (b.getStartedAt().isBefore(cutoff) && !liveState.hasHost(b.getId())) {
-                log.info("송출 연결이 없는 방송 {} 종료", b.getId());
-                endIfLive(b.getId());
+            long id = b.getId();
+            if (liveState.hasHost(id)) {
+                liveState.dropViewersDisconnectedBefore(id, graceCutoff);
+                continue;
             }
+            var disconnectedAt = liveState.hostDisconnectedAt(id);
+            if (disconnectedAt.isPresent()) {
+                if (disconnectedAt.get().isBefore(graceCutoff)) {
+                    log.info("송출 연결이 끊긴 뒤 재연결 유예가 지난 방송 {} 종료", id);
+                    endIfLive(id);
+                    continue;
+                }
+            } else if (b.getStartedAt().isBefore(neverConnectedCutoff)) {
+                log.info("송출 연결이 한 번도 없었던 방송 {} 종료", id);
+                endIfLive(id);
+                continue;
+            }
+            liveState.dropViewersDisconnectedBefore(id, graceCutoff);
         }
     }
 
-    /** 서버가 재시작되면 송출 연결이 모두 사라지므로, 남아 있는 방송 중을 모두 종료합니다. */
+    /**
+     * 서버가 뜰 때 방송 중인 방송을 종료하지 않습니다(스케일 아웃·재시작이 방송 종료가 되지 않도록).
+     * 송출자 상태를 모르는 방송은 지금 끊긴 것으로 기록해, 송출 화면이 재연결 유예 안에 돌아오지 않을 때만 종료되게 합니다.
+     * 첫 정리 작업 전에 끝나도록 정리 작업도 처음 한 번 이 작업을 먼저 합니다.
+     */
     @EventListener(ApplicationReadyEvent.class)
-    @Transactional
-    public void endLeftoversOnStartup() {
-        int n = repository.endAllLive(Instant.now());
-        if (n > 0) log.info("재시작 전 방송 중이던 방송 {}개를 종료로 바꿨습니다.", n);
+    @Transactional(readOnly = true)
+    public void giveGraceToLiveBroadcastsOnStartup() {
+        if (startupGraceGiven.getAndSet(true)) return;
+        Instant now = Instant.now();
+        for (Broadcast b : repository.findAllByStatusOrderByStartedAtDesc(Broadcast.Status.LIVE)) {
+            liveState.markHostDisconnectedIfUnknown(b.getId(), now);
+        }
     }
 
     /**

@@ -57,6 +57,7 @@
         <button class="btn btn-danger" type="button" id="btn-end">방송 종료</button>
       </div>
       <p class="meta" id="live-note" style="margin-top:10px"></p>
+      <p class="notice warn" id="conn-note" hidden></p>
       <!-- 방송 중 댓글: 시청자가 쓴 댓글이 바로 보이고, 스트리머는 댓글을 삭제할 수 있음 -->
       <div class="donations-wrap" id="donations"></div>
       <div class="comments-wrap live-comments" id="comments"></div>
@@ -76,7 +77,7 @@
   <script>
     const $ = (id) => document.getElementById(id);
     const s = {
-      stream: null, facing: 'user', broadcast: null, ws: null, comments: null,
+      stream: null, facing: 'user', broadcast: null, sig: null, comments: null,
       peers: new Map(), iceServers: [], timer: null, wakeLock: null, live: false, ending: false,
     };
 
@@ -133,16 +134,25 @@
       }
     });
 
+    // 시그널링 연결은 끊기면 자동으로 다시 연결합니다(서버가 내려가면 4001 → 바로, 그 외 비정상 종료 → 백오프).
+    // 재연결 유예 안에 다시 붙으면 같은 방송이 이어지고, 이미 연결된 시청자와의 P2P(영상)는 그대로 유지됩니다.
     function connect() {
-      const ws = new WebSocket(chi.wsUrl(`/ws/broadcasts/${s.broadcast.id}`));
-      s.ws = ws;
-      ws.onopen = () => {
-        // 송출자 권한은 서버가 이 WebSocket 연결의 로그인 세션으로 확인합니다(소유자가 아니면 error 후 끊김).
-        ws.send(JSON.stringify({ type: 'join', role: 'host' }));
-        goLive();
-      };
-      ws.onmessage = (ev) => onMessage(JSON.parse(ev.data));
-      ws.onclose = () => { if (s.live) finish('서버와의 연결이 끊겨 방송이 종료되었습니다.'); };
+      s.sig = chi.signaling(`/ws/broadcasts/${s.broadcast.id}`, {
+        onOpen: (reconnected) => {
+          // 송출자 권한은 서버가 이 WebSocket 연결의 로그인 세션으로 확인합니다(소유자가 아니면 error 후 끊김).
+          send({ type: 'join', role: 'host' });
+          if (!reconnected) goLive();
+          else setConnNote('');
+        },
+        onMessage: (m) => onMessage(m),
+        onDisconnect: () => setConnNote('서버와 연결이 끊겨 다시 연결하는 중입니다… 시청자 영상은 계속 송출됩니다.'),
+        onClosed: () => { if (s.live) finish('서버와의 연결이 끊겨 방송이 종료되었습니다.'); },
+      });
+    }
+
+    function setConnNote(text) {
+      $('conn-note').hidden = !text;
+      $('conn-note').textContent = text;
     }
 
     function goLive() {
@@ -152,7 +162,7 @@
       $('setup').hidden = true;
       $('live-controls').hidden = false;
       $('hud').hidden = false;
-      $('live-note').innerHTML = `시청 주소: <b>${chi.esc(location.origin)}/live.html?id=${s.broadcast.id}</b> · 이 화면을 닫거나 새로고침하면 방송이 종료됩니다.`;
+      $('live-note').innerHTML = `시청 주소: <b>${chi.esc(location.origin)}/live.html?id=${s.broadcast.id}</b> · 이 화면을 닫거나 새로고침하면 잠시 뒤 방송이 종료됩니다.`;
       s.timer = setInterval(() => { $('elapsed').textContent = chi.elapsed(s.broadcast.startedAt); }, 1000);
       s.comments = chiComments.mount($('comments'), { kind: 'broadcasts', id: s.broadcast.id, ownerOf: () => s.broadcast.owner });
       s.donations = chiDonations.mount($('donations'), { kind: 'broadcasts', id: s.broadcast.id, ownerOf: () => s.broadcast.owner });
@@ -183,6 +193,9 @@
 
     // 시청자 한 명당 RTCPeerConnection 하나 (P2P)
     async function offerTo(viewerId) {
+      // 재연결하면 서버가 지금 있는 시청자를 다시 알려 줌: 이미 P2P 가 살아 있는 시청자는 그대로 둠
+      const existing = s.peers.get(viewerId);
+      if (existing && !['failed', 'closed'].includes(existing.pc.connectionState)) return;
       dropPeer(viewerId);
       const pc = new RTCPeerConnection({ iceServers: s.iceServers });
       s.peers.set(viewerId, { pc, pending: [] });
@@ -211,7 +224,7 @@
       if (p) { p.pc.close(); s.peers.delete(viewerId); }
     }
 
-    function send(msg) { if (s.ws?.readyState === WebSocket.OPEN) s.ws.send(JSON.stringify(msg)); }
+    function send(msg) { s.sig?.send(msg); }
 
     $('btn-flip').addEventListener('click', async () => {
       const facing = s.facing === 'user' ? 'environment' : 'user';
@@ -253,7 +266,8 @@
       s.live = false;
       clearInterval(s.timer);
       for (const id of [...s.peers.keys()]) dropPeer(id);
-      s.ws?.close();
+      s.sig?.stop();
+      setConnNote('');
       s.stream?.getTracks().forEach((t) => t.stop());
       s.wakeLock?.release().catch(() => {});
       document.title = '치치직 - 방송 종료';

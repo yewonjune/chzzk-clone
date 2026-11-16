@@ -31,10 +31,4 @@ public interface BroadcastRepository extends JpaRepository<Broadcast, Long> {
     @Query("update Broadcast b set b.status = com.chichijik.broadcast.Broadcast.Status.ENDED, b.endedAt = :at "
             + "where b.id = :id and b.status = com.chichijik.broadcast.Broadcast.Status.LIVE")
     int endIfLive(@Param("id") long id, @Param("at") Instant at);
-
-    /** 서버 재시작 시: 송출 연결이 모두 사라졌으므로 방송 중인 방송을 일괄 종료합니다. */
-    @Modifying
-    @Query("update Broadcast b set b.status = com.chichijik.broadcast.Broadcast.Status.ENDED, b.endedAt = :at "
-            + "where b.status = com.chichijik.broadcast.Broadcast.Status.LIVE")
-    int endAllLive(@Param("at") Instant at);
 }

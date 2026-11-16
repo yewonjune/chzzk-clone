@@ -38,7 +38,8 @@ class ClusterBroadcastTest {
 
     @BeforeAll
     static void startCluster() throws Exception {
-        cluster = Cluster.start(tempDir, "--app.payment.provider=fake", "--app.live.max-viewers=" + MAX_VIEWERS);
+        cluster = Cluster.start(tempDir, "--app.payment.provider=fake", "--app.live.max-viewers=" + MAX_VIEWERS,
+                BroadcastFlowTest.GRACE, BroadcastFlowTest.SWEEP);
     }
 
     @AfterAll
@@ -156,6 +157,53 @@ class ClusterBroadcastTest {
             var b = json(ApiClient.anonymous(server).get("/api/broadcasts/" + live.id()));
             assertThat(b.get("status").asString()).isEqualTo("ended");
         }
+    }
+
+    @Test
+    void 송출자가_A에서_끊기고_유예_안에_B로_다시_붙으면_방송이_이어지고_시청자는_종료_알림을_받지_않는다() throws Exception {
+        Live live = liveOnA();
+        Socket viewerOnB = viewer(cluster.b, live.id());
+        String viewerId = viewerOnB.next("joined").get("viewerId").asString();
+        live.host().next("viewer-joined");
+
+        // A 의 송출 연결이 끊김 → 어느 서버에서 봐도 방송 중
+        live.host().close();
+        for (String server : List.of(cluster.a, cluster.b)) {
+            assertThat(json(ApiClient.anonymous(server).get("/api/broadcasts/" + live.id())).get("status").asString())
+                    .isEqualTo("live");
+        }
+
+        // 같은 로그인 세션으로 B 에 다시 붙음 → 지금 있는 시청자를 다시 알려 줌
+        Socket hostOnB = live.owner().on(cluster.b).socket("/ws/broadcasts/" + live.id());
+        hostOnB.send("{\"type\":\"join\",\"role\":\"host\"}");
+        assertThat(hostOnB.next("viewer-joined").get("viewerId").asString()).isEqualTo(viewerId);
+
+        Thread.sleep(BroadcastFlowTest.GRACE_MS + 1_000);
+        for (String server : List.of(cluster.a, cluster.b)) {
+            assertThat(json(ApiClient.anonymous(server).get("/api/broadcasts/" + live.id())).get("status").asString())
+                    .isEqualTo("live");
+        }
+        assertThat(viewerOnB.inbox).noneMatch(m -> "ended".equals(m.get("type").asString()));
+
+        // 시청자도 B 에서 비정상으로 끊긴 뒤 A 로 같은 viewerId 를 들고 이어 붙음: 시청자 수 그대로, 송출자에게 새 입장 알림 없음
+        hostOnB.inbox.clear();
+        viewerOnB.drop();
+        Socket viewerOnA = ApiClient.anonymous(cluster.a).socket("/ws/broadcasts/" + live.id());
+        viewerOnA.send("{\"type\":\"join\",\"role\":\"viewer\",\"viewerId\":\"" + viewerId + "\"}");
+        var resumed = viewerOnA.next("joined");
+        assertThat(resumed.get("resumed").asBoolean()).isTrue();
+        assertThat(viewerOnA.next("viewers").get("count").asInt()).isEqualTo(1);
+        hostOnB.send("{\"type\":\"signal\",\"to\":\"" + viewerId + "\",\"data\":{\"candidate\":\"c1\"}}");
+        assertThat(viewerOnA.next("signal").get("data").get("candidate").asString()).isEqualTo("c1");
+        Thread.sleep(BroadcastFlowTest.GRACE_MS + 1_000); // 유예가 지나도 이어 붙은 시청자는 퇴장되지 않음
+        assertThat(hostOnB.inbox).noneMatch(m -> m.get("type").asString().startsWith("viewer-"));
+        assertThat(json(ApiClient.anonymous(cluster.b).get("/api/broadcasts/" + live.id())).get("viewerCount").asInt())
+                .isEqualTo(1);
+
+        // 송출자가 돌아오지 않으면 유예 뒤 종료 알림이 정확히 한 번 (두 서버가 모두 정리 작업을 돌려도)
+        hostOnB.close();
+        assertThat(viewerOnA.next("ended")).isNotNull();
+        assertThat(viewerOnA.countWithin("ended", Duration.ofSeconds(1))).isZero();
     }
 
     @Test
