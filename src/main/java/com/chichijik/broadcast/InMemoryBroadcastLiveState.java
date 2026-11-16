@@ -66,10 +66,10 @@ public class InMemoryBroadcastLiveState implements BroadcastLiveState {
             present = List.copyOf(r.viewers.keySet());
         }
         if (previous != null && previous != host && previous.isOpen()) {
-            WebSockets.send(previous, Map.of("type", "error", "message", "다른 화면에서 송출을 이어받았습니다."));
+            WebSockets.send(previous, SignalingMessages.error(SignalingMessages.HOST_REPLACED));
             WebSockets.closeQuietly(previous, CloseStatus.POLICY_VIOLATION);
         }
-        for (String viewerId : present) WebSockets.send(host, Map.of("type", "viewer-joined", "viewerId", viewerId));
+        for (String viewerId : present) WebSockets.send(host, SignalingMessages.viewerJoined(viewerId));
         broadcastViewerCount(id);
         return true;
     }
@@ -88,8 +88,8 @@ public class InMemoryBroadcastLiveState implements BroadcastLiveState {
             if (!full) r.viewers.put(viewerId, new Viewer(viewer));
             host = r.host;
         }
-        if (host != null && released) WebSockets.send(host, Map.of("type", "viewer-left", "viewerId", startingOver));
-        if (host != null && !full) WebSockets.send(host, Map.of("type", "viewer-joined", "viewerId", viewerId));
+        if (host != null && released) WebSockets.send(host, SignalingMessages.viewerLeft(startingOver));
+        if (host != null && !full) WebSockets.send(host, SignalingMessages.viewerJoined(viewerId));
         if (released || !full) broadcastViewerCount(id);
         return full ? JoinResult.FULL : JoinResult.OK;
     }
@@ -195,7 +195,7 @@ public class InMemoryBroadcastLiveState implements BroadcastLiveState {
             host = r.host;
         }
         if (removed.isEmpty()) return;
-        if (host != null) for (String viewerId : removed) WebSockets.send(host, Map.of("type", "viewer-left", "viewerId", viewerId));
+        if (host != null) for (String viewerId : removed) WebSockets.send(host, SignalingMessages.viewerLeft(viewerId));
         broadcastViewerCount(id);
     }
 
@@ -208,7 +208,7 @@ public class InMemoryBroadcastLiveState implements BroadcastLiveState {
             Viewer v = r.viewers.get(viewerId);
             viewer = v == null ? null : v.session;
         }
-        if (viewer != null) WebSockets.send(viewer, Map.of("type", "signal", "data", data));
+        if (viewer != null) WebSockets.send(viewer, SignalingMessages.signalFromHost(data));
     }
 
     @Override
@@ -219,7 +219,7 @@ public class InMemoryBroadcastLiveState implements BroadcastLiveState {
         synchronized (r) {
             host = r.host;
         }
-        if (host != null) WebSockets.send(host, Map.of("type", "signal", "from", viewerId, "data", data));
+        if (host != null) WebSockets.send(host, SignalingMessages.signalFromViewer(viewerId, data));
     }
 
     /** 방송 종료: 송출자·시청자에게 ended 를 보내고 모든 연결을 닫은 뒤 기록을 없앱니다. */
@@ -236,7 +236,7 @@ public class InMemoryBroadcastLiveState implements BroadcastLiveState {
             r.host = null;
         }
         for (WebSocketSession s : targets) {
-            WebSockets.send(s, Map.of("type", "ended"));
+            WebSockets.send(s, SignalingMessages.ended());
             WebSockets.closeQuietly(s, CloseStatus.NORMAL);
         }
     }
@@ -280,7 +280,7 @@ public class InMemoryBroadcastLiveState implements BroadcastLiveState {
             targets = connected(r);
             count = r.viewers.size();
         }
-        Map<String, Object> msg = Map.of("type", "viewers", "count", count);
+        Map<String, Object> msg = SignalingMessages.viewers(count);
         for (WebSocketSession s : targets) WebSockets.send(s, msg);
     }
 

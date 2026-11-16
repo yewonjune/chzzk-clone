@@ -4,7 +4,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.slf4j.Logger;
@@ -82,7 +81,7 @@ public class BroadcastService {
         Ownership.requireOwner(b.getOwner(), me, "이 방송을 수정할 권한이 없습니다.");
         String title = validTitle(rawTitle);
         b.rename(title);
-        if (b.isLive()) AfterCommit.run(() -> liveState.sendToAll(id, Map.of("type", "title", "title", title)));
+        if (b.isLive()) AfterCommit.run(() -> liveState.sendToAll(id, SignalingMessages.title(title)));
         return BroadcastResponse.from(b, liveState.viewerCount(id));
     }
 

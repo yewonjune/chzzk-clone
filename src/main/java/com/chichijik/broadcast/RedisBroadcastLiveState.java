@@ -32,7 +32,6 @@ import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.WebSocketSession;
 
 import jakarta.annotation.PreDestroy;
-import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
@@ -48,12 +47,7 @@ import tools.jackson.databind.json.JsonMapper;
  *   chichijik:live:{id}:viewers  hash  viewerId → 시청자 연결을 든 인스턴스 id
  *   chichijik:live:{id}:viewers-disconnected  hash  viewerId → 끊긴 시각(epoch ms). 재연결 유예 중인 시청자
  *   chichijik:live:{id}:ended    문자열  종료 표시 (TTL {@link #ENDED_MARKER_TTL}). 있으면 입장·송출자 연결을 받지 않음
- *   chichijik:live:{id}          채널  봉투(JSON) {"k":대상, ...}
- *     k=host   {m}      송출자에게 m 전달
- *     k=viewer {v, m}   시청자 v 에게 m 전달
- *     k=all    {m}      송출자·시청자 모두에게 m 전달 (시청자 수, 댓글, 후원, 제목)
- *     k=host-attached {t}  새 송출자 연결(t)이 붙음 → 다른 인스턴스가 든 이전 송출자 연결을 닫음
- *     k=ended            종료 알림을 보내고 이 방송의 연결을 모두 닫음
+ *   chichijik:live:{id}          채널  봉투 {@link Envelope} (JSON)
  *
  *   chichijik:instance:{인스턴스 id}  문자열  하트비트. 인스턴스가 살아 있는 동안 주기적으로 TTL 과 함께 갱신
  *
@@ -77,118 +71,169 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
     static final Duration ENDED_MARKER_TTL = Duration.ofHours(1);
 
     /**
+     * 방송 채널로 오가는 봉투. kind 가 무엇을 할지 정합니다.
+     *   TO_HOST       송출자에게 message 전달
+     *   TO_VIEWER     시청자 viewerId 에게 message 전달
+     *   TO_ALL        송출자·시청자 모두에게 message 전달 (시청자 수, 댓글, 후원, 제목)
+     *   HOST_ATTACHED 새 송출자 연결(hostToken)이 붙음 → 다른 인스턴스가 든 이전 송출자 연결을 닫음
+     *   ENDED         종료 알림을 보내고 이 방송의 연결을 모두 닫음
+     */
+    record Envelope(Kind kind, String viewerId, String hostToken, Map<String, ?> message) {
+
+        enum Kind { TO_HOST, TO_VIEWER, TO_ALL, HOST_ATTACHED, ENDED }
+
+        static Envelope toHost(Map<String, ?> message) {
+            return new Envelope(Kind.TO_HOST, null, null, message);
+        }
+
+        static Envelope toViewer(String viewerId, Map<String, ?> message) {
+            return new Envelope(Kind.TO_VIEWER, viewerId, null, message);
+        }
+
+        static Envelope toAll(Map<String, ?> message) {
+            return new Envelope(Kind.TO_ALL, null, null, message);
+        }
+
+        static Envelope hostAttached(String hostToken) {
+            return new Envelope(Kind.HOST_ATTACHED, null, hostToken, null);
+        }
+
+        static Envelope ended() {
+            return new Envelope(Kind.ENDED, null, null, null);
+        }
+
+        String json() {
+            return JSON.writeValueAsString(this);
+        }
+    }
+
+    /**
+     * 스크립트 앞에 붙이는 Lua 도우미.
+     * publishViewerCount(채널, viewers 키): 지금 시청자 수를 TO_ALL 봉투로 발행 ({@link SignalingMessages#viewers}와 같은 모양)
+     */
+    private static final String LUA_HELPERS = """
+            local function publishViewerCount(channel, viewersKey)
+              local message = {type = 'viewers', count = redis.call('HLEN', viewersKey)}
+              redis.call('PUBLISH', channel, cjson.encode({kind = '%s', message = message}))
+            end
+            """.formatted(Envelope.Kind.TO_ALL.name());
+
+    private static RedisScript<Long> script(String body) {
+        return RedisScript.of(LUA_HELPERS + body, Long.class);
+    }
+
+    /**
      * KEYS[1]=viewers, KEYS[2]=viewers-disconnected, KEYS[3]=ended,
      * ARGV: 상한, viewerId, 인스턴스 id, 채널, viewer-joined 봉투, 처음부터 다시 입장하는 시청자의 이전 viewerId(없으면 ""),
      *       그 viewer-left 봉투 → 1 이면 입장, 0 이면 FULL, -1 이면 이미 종료된 방송. 이전 자리는 상한 검사 전에 비움
      */
-    private static final RedisScript<Long> JOIN = RedisScript.of("""
+    private static final RedisScript<Long> JOIN = script("""
             if redis.call('EXISTS', KEYS[3]) == 1 then return -1 end
-            if ARGV[6] ~= '' and redis.call('HDEL', KEYS[1], ARGV[6]) == 1 then
+            local released = ARGV[6] ~= '' and redis.call('HDEL', KEYS[1], ARGV[6]) == 1
+            if released then
               redis.call('HDEL', KEYS[2], ARGV[6])
               redis.call('PUBLISH', ARGV[4], ARGV[7])
-              if redis.call('HLEN', KEYS[1]) >= tonumber(ARGV[1]) then
-                redis.call('PUBLISH', ARGV[4], '{"k":"all","m":{"type":"viewers","count":' .. redis.call('HLEN', KEYS[1]) .. '}}')
-              end
             end
-            if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 0 then
-              if redis.call('HLEN', KEYS[1]) >= tonumber(ARGV[1]) then return 0 end
+            if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 0 and redis.call('HLEN', KEYS[1]) >= tonumber(ARGV[1]) then
+              if released then publishViewerCount(ARGV[4], KEYS[1]) end
+              return 0
             end
             redis.call('HSET', KEYS[1], ARGV[2], ARGV[3])
             redis.call('PUBLISH', ARGV[4], ARGV[5])
-            redis.call('PUBLISH', ARGV[4], '{"k":"all","m":{"type":"viewers","count":' .. redis.call('HLEN', KEYS[1]) .. '}}')
+            publishViewerCount(ARGV[4], KEYS[1])
             return 1
-            """, Long.class);
+            """);
 
     /**
      * KEYS[1]=viewers, KEYS[2]=viewers-disconnected, ARGV: viewerId, 채널, viewer-left 봉투, 인스턴스 id
      * → 이 인스턴스 소속 시청자면 빼고 1 (다른 인스턴스로 이어 붙은 시청자는 그대로)
      */
-    private static final RedisScript<Long> LEAVE = RedisScript.of("""
+    private static final RedisScript<Long> LEAVE = script("""
             if redis.call('HGET', KEYS[1], ARGV[1]) ~= ARGV[4] then return 0 end
             redis.call('HDEL', KEYS[1], ARGV[1])
             redis.call('HDEL', KEYS[2], ARGV[1])
             redis.call('PUBLISH', ARGV[2], ARGV[3])
-            redis.call('PUBLISH', ARGV[2], '{"k":"all","m":{"type":"viewers","count":' .. redis.call('HLEN', KEYS[1]) .. '}}')
+            publishViewerCount(ARGV[2], KEYS[1])
             return 1
-            """, Long.class);
+            """);
 
     /**
      * KEYS[1]=ended, KEYS[2..]=이 방송의 나머지 기록, ARGV: 종료 표시 TTL(ms), 채널, ended 봉투
      * → 종료 표시를 남기고 기록을 지운 뒤 종료를 알림. 이후의 JOIN·ATTACH_HOST 는 종료 표시를 보고 기록을 다시 만들지 않음
      */
-    private static final RedisScript<Long> END = RedisScript.of("""
+    private static final RedisScript<Long> END = script("""
             redis.call('SET', KEYS[1], '1', 'PX', ARGV[1])
             for i = 2, #KEYS do redis.call('DEL', KEYS[i]) end
             redis.call('PUBLISH', ARGV[2], ARGV[3])
             return 1
-            """, Long.class);
+            """);
 
     /** KEYS[1]=viewers, KEYS[2]=viewers-disconnected, ARGV: viewerId, 인스턴스 id, 지금(ms) → 이 인스턴스 소속이면 끊긴 시각 기록 */
-    private static final RedisScript<Long> VIEWER_DISCONNECTED = RedisScript.of("""
+    private static final RedisScript<Long> VIEWER_DISCONNECTED = script("""
             if redis.call('HGET', KEYS[1], ARGV[1]) ~= ARGV[2] then return 0 end
             redis.call('HSET', KEYS[2], ARGV[1], ARGV[3])
             return 1
-            """, Long.class);
+            """);
 
     /** KEYS[1]=viewers, KEYS[2]=viewers-disconnected, ARGV: viewerId, 인스턴스 id → 집합에 있으면 소속을 바꾸고 1 */
-    private static final RedisScript<Long> RESUME = RedisScript.of("""
+    private static final RedisScript<Long> RESUME = script("""
             if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 0 then return 0 end
             redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
             redis.call('HDEL', KEYS[2], ARGV[1])
             return 1
-            """, Long.class);
+            """);
 
     /**
      * KEYS[1]=viewers, KEYS[2]=viewers-disconnected, ARGV: viewerId, cutoff(ms), 채널, viewer-left 봉투
      * → 끊긴 시각이 cutoff 이전이면(그사이 이어 붙지 않았으면) 퇴장시키고 1. 여러 인스턴스가 동시에 돌아도 한 번만 퇴장
      */
-    private static final RedisScript<Long> DROP_DISCONNECTED = RedisScript.of("""
+    private static final RedisScript<Long> DROP_DISCONNECTED = script("""
             local t = redis.call('HGET', KEYS[2], ARGV[1])
             if not t or tonumber(t) >= tonumber(ARGV[2]) then return 0 end
             redis.call('HDEL', KEYS[2], ARGV[1])
             if redis.call('HDEL', KEYS[1], ARGV[1]) == 0 then return 0 end
             redis.call('PUBLISH', ARGV[3], ARGV[4])
-            redis.call('PUBLISH', ARGV[3], '{"k":"all","m":{"type":"viewers","count":' .. redis.call('HLEN', KEYS[1]) .. '}}')
+            publishViewerCount(ARGV[3], KEYS[1])
             return 1
-            """, Long.class);
+            """);
 
     /** KEYS[1]=host, ARGV: token, 지금(ms) → 지금 송출자가 이 연결이면 끊김으로 바꾸고 1 (기록은 남김) */
-    private static final RedisScript<Long> DETACH_HOST = RedisScript.of("""
+    private static final RedisScript<Long> DETACH_HOST = script("""
             if redis.call('HGET', KEYS[1], 'token') ~= ARGV[1] then return 0 end
             redis.call('HDEL', KEYS[1], 'token', 'instance')
             redis.call('HSET', KEYS[1], 'disconnectedAt', ARGV[2])
             return 1
-            """, Long.class);
+            """);
 
     /** KEYS[1]=host, KEYS[2]=ended, ARGV: instance, token → 송출자로 기록하고 끊긴 시각을 지움. 이미 종료된 방송이면 0 */
-    private static final RedisScript<Long> ATTACH_HOST = RedisScript.of("""
+    private static final RedisScript<Long> ATTACH_HOST = script("""
             if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
             redis.call('HDEL', KEYS[1], 'disconnectedAt')
             redis.call('HSET', KEYS[1], 'instance', ARGV[1], 'token', ARGV[2])
             return 1
-            """, Long.class);
+            """);
 
     /**
      * KEYS[1]=viewers, KEYS[2]=viewers-disconnected, ARGV: viewerId, 죽은 인스턴스 id, 채널, viewer-left 봉투
      * → 아직 그 인스턴스에 연결된 것으로 남은 시청자면 퇴장시키고 1. 그사이 다른 인스턴스로 이어 붙었거나
      *   이미 끊김으로 기록된(재연결 유예 중인) 시청자는 그대로 두므로 여러 인스턴스가 동시에 돌아도 한 번만 퇴장
      */
-    private static final RedisScript<Long> RELEASE_VIEWER = RedisScript.of("""
+    private static final RedisScript<Long> RELEASE_VIEWER = script("""
             if redis.call('HGET', KEYS[1], ARGV[1]) ~= ARGV[2] then return 0 end
             if redis.call('HEXISTS', KEYS[2], ARGV[1]) == 1 then return 0 end
             redis.call('HDEL', KEYS[1], ARGV[1])
             redis.call('PUBLISH', ARGV[3], ARGV[4])
-            redis.call('PUBLISH', ARGV[3], '{"k":"all","m":{"type":"viewers","count":' .. redis.call('HLEN', KEYS[1]) .. '}}')
+            publishViewerCount(ARGV[3], KEYS[1])
             return 1
-            """, Long.class);
+            """);
 
     /** KEYS[1]=host, ARGV: 죽은 인스턴스 id, 지금(ms) → 송출자가 아직 그 인스턴스 소속이면 지금 끊긴 것으로 바꾸고 1 */
-    private static final RedisScript<Long> RELEASE_HOST = RedisScript.of("""
+    private static final RedisScript<Long> RELEASE_HOST = script("""
             if redis.call('HGET', KEYS[1], 'instance') ~= ARGV[1] then return 0 end
             redis.call('HDEL', KEYS[1], 'token', 'instance')
             redis.call('HSET', KEYS[1], 'disconnectedAt', ARGV[2])
             return 1
-            """, Long.class);
+            """);
 
     private final StringRedisTemplate redis;
     private final RedisMessageListenerContainer container;
@@ -199,7 +244,8 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
     private final ScheduledExecutorService heartbeat =
             Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "live-heartbeat"));
     private final Duration heartbeatTtl;
-    private final Map<Long, Local> locals = new ConcurrentHashMap<>();
+    /** 방송 id → 이 인스턴스에 붙은 그 방송의 연결 */
+    private final Map<Long, LocalConnections> connections = new ConcurrentHashMap<>();
     /**
      * 종료 중: 열린 WebSocket 은 그보다 앞선 종료 단계에서 4001로 닫히지만(SignalingHandler), 그 뒤에 늦게 닫히는 연결이
      * 이미 닫힌 Redis 를 건드리지 않도록 막습니다.
@@ -207,8 +253,8 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
      */
     private volatile boolean stopping;
 
-    /** 이 인스턴스에 붙은 방송 하나의 연결 */
-    static final class Local {
+    /** 이 인스턴스에 붙은 방송 하나의 WebSocket 연결 (송출자 하나와 시청자들) */
+    static final class LocalConnections {
         WebSocketSession host;
         String hostToken;
         final Map<String, WebSocketSession> viewers = new LinkedHashMap<>();
@@ -276,8 +322,8 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
         return PREFIX + id + ":ended";
     }
 
-    private Local local(long id) {
-        return locals.computeIfAbsent(id, k -> new Local());
+    private LocalConnections connectionsOf(long id) {
+        return connections.computeIfAbsent(id, k -> new LocalConnections());
     }
 
     // ---- 상태 변경 ----
@@ -285,68 +331,68 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
     @Override
     public boolean attachHost(long id, WebSocketSession host) {
         String token = UUID.randomUUID().toString();
-        Local l = local(id);
+        LocalConnections c = connectionsOf(id);
         WebSocketSession previous;
-        synchronized (l) {
-            previous = l.host;
-            l.host = host;
-            l.hostToken = token;
+        synchronized (c) {
+            previous = c.host;
+            c.host = host;
+            c.hostToken = token;
         }
         Long attached = redis.execute(ATTACH_HOST, List.of(hostKey(id), endedKey(id)), instanceId, token);
         if (attached == null || attached != 1) {
-            synchronized (l) {
-                if (l.host == host) {
-                    l.host = null;
-                    l.hostToken = null;
+            synchronized (c) {
+                if (c.host == host) {
+                    c.host = null;
+                    c.hostToken = null;
                 }
             }
-            forgetIfEmpty(id, l);
+            forgetIfEmpty(id, c);
             return false;
         }
         if (previous != null && previous != host && previous.isOpen()) closeReplaced(previous);
-        publish(id, Map.of("k", "host-attached", "t", token));
+        publish(id, Envelope.hostAttached(token));
         for (Object viewerId : redis.opsForHash().keys(viewersKey(id))) {
-            WebSockets.send(host, Map.of("type", "viewer-joined", "viewerId", viewerId));
+            WebSockets.send(host, SignalingMessages.viewerJoined(viewerId.toString()));
         }
-        publish(id, Map.of("k", "all", "m", Map.of("type", "viewers", "count", viewerCount(id))));
+        publish(id, Envelope.toAll(SignalingMessages.viewers(viewerCount(id))));
         return true;
     }
 
     @Override
     public JoinResult attachViewer(long id, String viewerId, WebSocketSession viewer, int maxViewers, String startingOver) {
-        Local l = local(id);
-        synchronized (l) {
-            l.viewers.put(viewerId, viewer); // 먼저 등록해야 자기 입장으로 바뀐 시청자 수를 받음
+        LocalConnections c = connectionsOf(id);
+        synchronized (c) {
+            c.viewers.put(viewerId, viewer); // 먼저 등록해야 자기 입장으로 바뀐 시청자 수를 받음
         }
         String previous = startingOver == null ? "" : startingOver;
-        Long ok = redis.execute(JOIN, List.of(viewersKey(id), disconnectedViewersKey(id), endedKey(id)), String.valueOf(maxViewers),
-                viewerId, instanceId, channel(id),
-                envelope(Map.of("k", "host", "m", Map.of("type", "viewer-joined", "viewerId", viewerId))), previous,
-                envelope(Map.of("k", "host", "m", Map.of("type", "viewer-left", "viewerId", previous))));
+        Long ok = redis.execute(JOIN, List.of(viewersKey(id), disconnectedViewersKey(id), endedKey(id)),
+                String.valueOf(maxViewers), viewerId, instanceId, channel(id),
+                Envelope.toHost(SignalingMessages.viewerJoined(viewerId)).json(), previous,
+                Envelope.toHost(SignalingMessages.viewerLeft(previous)).json());
         if (ok != null && ok == 1) return JoinResult.OK;
-        synchronized (l) {
-            l.viewers.remove(viewerId);
+        synchronized (c) {
+            c.viewers.remove(viewerId);
         }
         if (ok != null && ok == -1) {
-            forgetIfEmpty(id, l);
+            forgetIfEmpty(id, c);
             return JoinResult.ENDED;
         }
         return JoinResult.FULL;
     }
 
     /** 종료된 방송에 붙으려다 거절된 뒤 남은 빈 연결 묶음을 지움 (종료 알림을 이미 지나쳐 다시 지워질 일이 없음) */
-    private void forgetIfEmpty(long id, Local l) {
-        synchronized (l) {
-            if (l.host == null && l.viewers.isEmpty()) locals.remove(id, l);
+    private void forgetIfEmpty(long id, LocalConnections c) {
+        synchronized (c) {
+            if (c.host == null && c.viewers.isEmpty()) connections.remove(id, c);
         }
     }
 
     @Override
     public boolean resumeViewer(long id, String viewerId, WebSocketSession viewer) {
-        Local l = local(id);
+        LocalConnections c = connectionsOf(id);
         WebSocketSession previous;
-        synchronized (l) {
-            previous = l.viewers.put(viewerId, viewer); // 먼저 등록해야 이어 붙자마자 오는 시그널을 받음
+        synchronized (c) {
+            previous = c.viewers.put(viewerId, viewer); // 먼저 등록해야 이어 붙자마자 오는 시그널을 받음
         }
         Long ok = redis.execute(RESUME, List.of(viewersKey(id), disconnectedViewersKey(id)), viewerId, instanceId);
         if (ok != null && ok == 1) {
@@ -354,10 +400,10 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
             if (previous != null && previous != viewer) WebSockets.closeQuietly(previous, CloseStatus.NORMAL);
             return true;
         }
-        synchronized (l) {
-            if (l.viewers.get(viewerId) == viewer) {
-                if (previous != null) l.viewers.put(viewerId, previous);
-                else l.viewers.remove(viewerId);
+        synchronized (c) {
+            if (c.viewers.get(viewerId) == viewer) {
+                if (previous != null) c.viewers.put(viewerId, previous);
+                else c.viewers.remove(viewerId);
             }
         }
         return false;
@@ -393,7 +439,7 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
         for (Map.Entry<Object, Object> e : redis.opsForHash().entries(disconnectedViewersKey(id)).entrySet()) {
             String viewerId = e.getKey().toString();
             redis.execute(DROP_DISCONNECTED, List.of(viewersKey(id), disconnectedViewersKey(id)), viewerId, cutoffMs,
-                    channel(id), envelope(Map.of("k", "host", "m", Map.of("type", "viewer-left", "viewerId", viewerId))));
+                    channel(id), Envelope.toHost(SignalingMessages.viewerLeft(viewerId)).json());
         }
     }
 
@@ -416,7 +462,7 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
             if (isAlive(owner, alive)) continue;
             String viewerId = e.getKey().toString();
             redis.execute(RELEASE_VIEWER, List.of(viewersKey(id), disconnectedViewersKey(id)), viewerId, owner, channel(id),
-                    envelope(Map.of("k", "host", "m", Map.of("type", "viewer-left", "viewerId", viewerId))));
+                    Envelope.toHost(SignalingMessages.viewerLeft(viewerId)).json());
         }
     }
 
@@ -426,14 +472,14 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
 
     @Override
     public boolean detachHost(long id, WebSocketSession host) {
-        Local l = locals.get(id);
-        if (l == null) return false;
+        LocalConnections c = connections.get(id);
+        if (c == null) return false;
         String token;
-        synchronized (l) {
-            if (l.host != host) return false;
-            token = l.hostToken;
-            l.host = null;
-            l.hostToken = null;
+        synchronized (c) {
+            if (c.host != host) return false;
+            token = c.hostToken;
+            c.host = null;
+            c.hostToken = null;
         }
         if (stopping) return false;
         Long current = redis.execute(DETACH_HOST, List.of(hostKey(id)), token, String.valueOf(System.currentTimeMillis()));
@@ -442,17 +488,17 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
 
     @Override
     public void detachViewer(long id, String viewerId, WebSocketSession viewer, boolean leaving) {
-        Local l = locals.get(id);
-        if (l == null) return;
-        synchronized (l) {
-            if (l.viewers.get(viewerId) != viewer) return; // 이 인스턴스에서 다른 연결로 이미 이어 붙음
-            l.viewers.remove(viewerId);
+        LocalConnections c = connections.get(id);
+        if (c == null) return;
+        synchronized (c) {
+            if (c.viewers.get(viewerId) != viewer) return; // 이 인스턴스에서 다른 연결로 이미 이어 붙음
+            c.viewers.remove(viewerId);
         }
         if (stopping) return;
         List<String> keys = List.of(viewersKey(id), disconnectedViewersKey(id));
         if (leaving) {
             redis.execute(LEAVE, keys, viewerId, channel(id),
-                    envelope(Map.of("k", "host", "m", Map.of("type", "viewer-left", "viewerId", viewerId))), instanceId);
+                    Envelope.toHost(SignalingMessages.viewerLeft(viewerId)).json(), instanceId);
         } else {
             redis.execute(VIEWER_DISCONNECTED, keys, viewerId, instanceId, String.valueOf(System.currentTimeMillis()));
         }
@@ -462,23 +508,23 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
 
     @Override
     public void relayToViewer(long id, String viewerId, Object data) {
-        publish(id, Map.of("k", "viewer", "v", viewerId, "m", Map.of("type", "signal", "data", data)));
+        publish(id, Envelope.toViewer(viewerId, SignalingMessages.signalFromHost(data)));
     }
 
     @Override
     public void relayToHost(long id, String viewerId, Object data) {
-        publish(id, Map.of("k", "host", "m", Map.of("type", "signal", "from", viewerId, "data", data)));
+        publish(id, Envelope.toHost(SignalingMessages.signalFromViewer(viewerId, data)));
     }
 
     @Override
     public void sendToAll(long id, Map<String, ?> message) {
-        publish(id, Map.of("k", "all", "m", message));
+        publish(id, Envelope.toAll(message));
     }
 
     @Override
     public void ended(long id) {
         redis.execute(END, List.of(endedKey(id), hostKey(id), viewersKey(id), disconnectedViewersKey(id)),
-                String.valueOf(ENDED_MARKER_TTL.toMillis()), channel(id), envelope(Map.of("k", "ended")));
+                String.valueOf(ENDED_MARKER_TTL.toMillis()), channel(id), Envelope.ended().json());
     }
 
     // ---- 조회 ----
@@ -497,12 +543,8 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
 
     // ---- 채널 ----
 
-    private void publish(long id, Map<String, ?> envelope) {
-        redis.convertAndSend(channel(id), envelope(envelope));
-    }
-
-    private static String envelope(Map<String, ?> envelope) {
-        return JSON.writeValueAsString(envelope);
+    private void publish(long id, Envelope envelope) {
+        redis.convertAndSend(channel(id), envelope.json());
     }
 
     /** 채널로 받은 봉투를 이 인스턴스의 연결 중 대상에게만 전달 */
@@ -515,83 +557,77 @@ public class RedisBroadcastLiveState implements BroadcastLiveState, MessageListe
         } catch (NumberFormatException e) {
             return;
         }
-        Local l = locals.get(id);
-        if (l == null) return;
-        JsonNode env;
+        LocalConnections c = connections.get(id);
+        if (c == null) return;
+        Envelope envelope;
         try {
-            env = JSON.readTree(message.getBody());
+            envelope = JSON.readValue(message.getBody(), Envelope.class);
         } catch (RuntimeException e) {
             log.debug("잘못된 방송 메시지: {}", e.getMessage());
             return;
         }
-        switch (env.path("k").asString()) {
-            case "host" -> {
+        if (envelope.kind() == null) return;
+        switch (envelope.kind()) {
+            case TO_HOST -> {
                 WebSocketSession host;
-                synchronized (l) {
-                    host = l.host;
+                synchronized (c) {
+                    host = c.host;
                 }
-                if (host != null) WebSockets.send(host, toMap(env.get("m")));
+                if (host != null) WebSockets.send(host, envelope.message());
             }
-            case "viewer" -> {
+            case TO_VIEWER -> {
                 WebSocketSession viewer;
-                synchronized (l) {
-                    viewer = l.viewers.get(env.path("v").asString());
+                synchronized (c) {
+                    viewer = c.viewers.get(envelope.viewerId());
                 }
-                if (viewer != null) WebSockets.send(viewer, toMap(env.get("m")));
+                if (viewer != null) WebSockets.send(viewer, envelope.message());
             }
-            case "all" -> {
-                Map<String, ?> m = toMap(env.get("m"));
-                for (WebSocketSession s : targets(l)) WebSockets.send(s, m);
+            case TO_ALL -> {
+                for (WebSocketSession s : targets(c)) WebSockets.send(s, envelope.message());
             }
-            case "host-attached" -> closeReplacedHost(l, env.path("t").asString());
-            case "ended" -> endLocal(id);
-            default -> { }
+            case HOST_ATTACHED -> closeReplacedHost(c, envelope.hostToken());
+            case ENDED -> endLocal(id);
         }
     }
 
-    private static List<WebSocketSession> targets(Local l) {
-        synchronized (l) {
-            List<WebSocketSession> all = new ArrayList<>(l.viewers.values());
-            if (l.host != null) all.add(l.host);
+    private static List<WebSocketSession> targets(LocalConnections c) {
+        synchronized (c) {
+            List<WebSocketSession> all = new ArrayList<>(c.viewers.values());
+            if (c.host != null) all.add(c.host);
             return all;
         }
     }
 
     /** 다른 연결이 송출자가 됐으면 이 인스턴스가 든 이전 송출자 연결을 닫음 */
-    private static void closeReplacedHost(Local l, String newToken) {
+    private static void closeReplacedHost(LocalConnections c, String newToken) {
         WebSocketSession previous;
-        synchronized (l) {
-            if (l.host == null || newToken.equals(l.hostToken)) return;
-            previous = l.host;
-            l.host = null;
-            l.hostToken = null;
+        synchronized (c) {
+            if (c.host == null || newToken == null || newToken.equals(c.hostToken)) return;
+            previous = c.host;
+            c.host = null;
+            c.hostToken = null;
         }
         closeReplaced(previous);
     }
 
     /** 교체된 송출자 연결: 재연결하지 않도록 알리고(error) 정책 위반(1008)으로 닫음 */
     private static void closeReplaced(WebSocketSession previous) {
-        WebSockets.send(previous, Map.of("type", "error", "message", "다른 화면에서 송출을 이어받았습니다."));
+        WebSockets.send(previous, SignalingMessages.error(SignalingMessages.HOST_REPLACED));
         WebSockets.closeQuietly(previous, CloseStatus.POLICY_VIOLATION);
     }
 
     private void endLocal(long id) {
-        Local l = locals.remove(id);
-        if (l == null) return;
-        List<WebSocketSession> all = targets(l);
-        synchronized (l) {
-            l.viewers.clear();
-            l.host = null;
-            l.hostToken = null;
+        LocalConnections c = connections.remove(id);
+        if (c == null) return;
+        List<WebSocketSession> all = targets(c);
+        synchronized (c) {
+            c.viewers.clear();
+            c.host = null;
+            c.hostToken = null;
         }
         for (WebSocketSession s : all) {
-            WebSockets.send(s, Map.of("type", "ended"));
+            WebSockets.send(s, SignalingMessages.ended());
             WebSockets.closeQuietly(s, CloseStatus.NORMAL);
         }
-    }
-
-    @SuppressWarnings("unchecked")
-    private static Map<String, ?> toMap(JsonNode node) {
-        return JSON.convertValue(node, Map.class);
     }
 }

@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.SmartLifecycle;
@@ -15,6 +16,7 @@ import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
+import com.chichijik.broadcast.BroadcastLiveState.JoinResult;
 import com.chichijik.user.LoginUser;
 
 import tools.jackson.databind.JsonNode;
@@ -45,7 +47,7 @@ public class SignalingHandler extends TextWebSocketHandler implements SmartLifec
     static final CloseStatus RECONNECT_ELSEWHERE = new CloseStatus(4001, "다른 서버로 재연결");
 
     /** 이 서버에 열려 있는 시그널링 연결 (서버 종료 시 4001로 닫기 위해) */
-    private final Set<WebSocketSession> open = ConcurrentHashMap.newKeySet();
+    private final Set<WebSocketSession> openConnections = ConcurrentHashMap.newKeySet();
     private volatile boolean running;
 
     private final BroadcastService service;
@@ -71,7 +73,7 @@ public class SignalingHandler extends TextWebSocketHandler implements SmartLifec
             return;
         }
         session.getAttributes().put(ATTR_ID, id);
-        open.add(session);
+        openConnections.add(session);
         // 여러 스레드가 같은 세션에 보낼 수 있으므로 동시 전송을 직렬화합니다.
         session.getAttributes().put(ATTR_SAFE, new ConcurrentWebSocketSessionDecorator(session, 5_000, 512 * 1024));
     }
@@ -112,14 +114,12 @@ public class SignalingHandler extends TextWebSocketHandler implements SmartLifec
             LoginUser me = loginUser(raw);
             if (me == null || !service.canHost(id, me)) {
                 String reason = me == null ? "로그인이 필요합니다." : "이 방송의 소유자만 송출할 수 있습니다. (또는 이미 종료된 방송)";
-                WebSockets.send(session, Map.of("type", "error", "message", reason));
+                WebSockets.send(session, SignalingMessages.error(reason));
                 WebSockets.closeQuietly(raw, CloseStatus.POLICY_VIOLATION);
                 return;
             }
-            raw.getAttributes().put(ATTR_ROLE, "host");
-            if (!liveState.attachHost(id, session)) { // 확인한 뒤 붙기 전에 종료됨
-                raw.getAttributes().remove(ATTR_ROLE);
-                sendEnded(raw, session);
+            if (!attachAs(raw, "host", null, true, () -> liveState.attachHost(id, session))) {
+                sendEnded(raw, session); // 확인한 뒤 붙기 전에 종료됨
             }
             return;
         }
@@ -131,45 +131,53 @@ public class SignalingHandler extends TextWebSocketHandler implements SmartLifec
         // 재연결: 이전 viewerId 가 아직 시청자 집합에 있으면 같은 시청자로 이어 붙음 (시청자 수·송출자 알림 없음)
         String previousId = text(msg, "viewerId");
         boolean startOver = msg.path("startOver").asBoolean(false);
-        if (previousId != null && !startOver) {
-            // 응답 전에 이 연결의 역할을 정해 두어야, 이어 붙자마자 오는 시그널을 받아 전달할 수 있습니다.
-            raw.getAttributes().put(ATTR_ROLE, "viewer");
-            raw.getAttributes().put(ATTR_VIEWER_ID, previousId);
-            if (liveState.resumeViewer(id, previousId, session)) {
-                WebSockets.send(session, Map.of("type", "joined", "viewerId", previousId, "resumed", true));
-                WebSockets.send(session, Map.of("type", "viewers", "count", liveState.viewerCount(id)));
-                return;
-            }
-            raw.getAttributes().remove(ATTR_ROLE);
-            raw.getAttributes().remove(ATTR_VIEWER_ID);
+        if (previousId != null && !startOver
+                && attachAs(raw, "viewer", previousId, true, () -> liveState.resumeViewer(id, previousId, session))) {
+            WebSockets.send(session, SignalingMessages.joined(previousId, true));
+            WebSockets.send(session, SignalingMessages.viewers(liveState.viewerCount(id)));
+            return;
         }
         String viewerId = WebSockets.newViewerId();
-        raw.getAttributes().put(ATTR_ROLE, "viewer");
-        raw.getAttributes().put(ATTR_VIEWER_ID, viewerId);
         String startingOver = startOver ? previousId : null;
-        BroadcastLiveState.JoinResult result = liveState.attachViewer(id, viewerId, session, maxViewers, startingOver);
-        if (result != BroadcastLiveState.JoinResult.OK) {
-            raw.getAttributes().remove(ATTR_ROLE);
-            raw.getAttributes().remove(ATTR_VIEWER_ID);
-            if (result == BroadcastLiveState.JoinResult.ENDED) {
+        JoinResult result = attachAs(raw, "viewer", viewerId, JoinResult.OK,
+                () -> liveState.attachViewer(id, viewerId, session, maxViewers, startingOver));
+        if (result != JoinResult.OK) {
+            if (result == JoinResult.ENDED) {
                 sendEnded(raw, session); // 방송 중인지 확인한 뒤 붙기 전에 종료됨
             } else {
-                WebSockets.send(session, Map.of("type", "full", "max", maxViewers));
+                WebSockets.send(session, SignalingMessages.full(maxViewers));
                 WebSockets.closeQuietly(raw, CloseStatus.NORMAL);
             }
             return;
         }
-        WebSockets.send(session, Map.of("type", "joined", "viewerId", viewerId, "resumed", false));
+        WebSockets.send(session, SignalingMessages.joined(viewerId, false));
+    }
+
+    /**
+     * 이 연결의 역할(과 시청자면 viewerId)을 정해 두고 attach 로 방송에 붙입니다. 붙이기 전에 정해 두어야 붙는 도중 연결이
+     * 닫혀도 afterConnectionClosed 가 자리를 정리하고, 붙자마자 오는 시그널도 전달됩니다.
+     * 결과가 success 가 아니면(붙지 못함) 정해 둔 역할을 지우고 결과를 그대로 돌려줍니다.
+     */
+    private static <T> T attachAs(WebSocketSession raw, String role, String viewerId, T success, Supplier<T> attach) {
+        Map<String, Object> attrs = raw.getAttributes();
+        attrs.put(ATTR_ROLE, role);
+        if (viewerId != null) attrs.put(ATTR_VIEWER_ID, viewerId);
+        T result = attach.get();
+        if (!success.equals(result)) {
+            attrs.remove(ATTR_ROLE);
+            attrs.remove(ATTR_VIEWER_ID);
+        }
+        return result;
     }
 
     private static void sendEnded(WebSocketSession raw, WebSocketSession session) {
-        WebSockets.send(session, Map.of("type", "ended"));
+        WebSockets.send(session, SignalingMessages.ended());
         WebSockets.closeQuietly(raw, CloseStatus.NORMAL);
     }
 
     @Override
     public void afterConnectionClosed(WebSocketSession raw, CloseStatus status) {
-        open.remove(raw);
+        openConnections.remove(raw);
         Long id = (Long) raw.getAttributes().get(ATTR_ID);
         String role = (String) raw.getAttributes().get(ATTR_ROLE);
         if (id == null || role == null) return;
@@ -202,7 +210,7 @@ public class SignalingHandler extends TextWebSocketHandler implements SmartLifec
     @Override
     public void stop() {
         running = false;
-        for (WebSocketSession s : List.copyOf(open)) WebSockets.closeQuietly(s, RECONNECT_ELSEWHERE);
+        for (WebSocketSession s : List.copyOf(openConnections)) WebSockets.closeQuietly(s, RECONNECT_ELSEWHERE);
     }
 
     @Override
