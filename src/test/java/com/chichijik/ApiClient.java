@@ -37,14 +37,33 @@ final class ApiClient {
     static final Duration WAIT = Duration.ofSeconds(5);
 
     final String base;
-    final CookieManager cookies = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
-    final HttpClient http = HttpClient.newBuilder().cookieHandler(cookies).build();
+    final CookieManager cookies;
+    final HttpClient http;
     private String csrfHeader;
     private String csrfToken;
     JsonNode user;
 
     private ApiClient(String base) {
         this.base = base;
+        this.cookies = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
+        this.http = HttpClient.newBuilder().cookieHandler(cookies).build();
+    }
+
+    private ApiClient(String base, ApiClient same) {
+        this.base = base;
+        this.cookies = same.cookies;
+        this.http = same.http;
+        this.csrfHeader = same.csrfHeader;
+        this.csrfToken = same.csrfToken;
+        this.user = same.user;
+    }
+
+    /**
+     * 같은 브라우저(같은 쿠키·CSRF 토큰)가 로드밸런서 뒤의 다른 서버로 보내는 요청.
+     * 쿠키는 포트를 구분하지 않으므로 localhost 의 A·B 서버에 같은 세션 쿠키가 실립니다.
+     */
+    ApiClient on(String otherBase) {
+        return new ApiClient(otherBase, this);
     }
 
     // ---- 서버 기동 ----
