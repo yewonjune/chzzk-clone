@@ -1,0 +1,100 @@
+# 치지직 데스크톱 앱: Windows·macOS 패키지를 빌드해 GitHub Releases 에 올립니다.
+#
+# 실행 방법
+#   git tag desktop-v1.0.0 && git push origin desktop-v1.0.0     → 빌드 + 릴리스 생성(파일 첨부)
+#   또는 Actions 탭 → "Desktop app" → Run workflow                 → 빌드만 (결과는 Artifacts 에서 받기)
+#
+# 앱이 처음 연결할 서버 주소: 저장소 Settings → Secrets and variables → Actions → Variables 에
+#   CHZZK_SERVER_URL = https://<구매한 도메인>   (비밀 값 아님. 비우면 package.json 의 기본값)
+#
+# 파일 이름에 버전이 없으므로 https://github.com/<저장소>/releases/latest/download/<파일> 이 항상 최신을 가리킵니다.
+# 서버의 다운로드 페이지(/download.html)가 이 주소로 연결합니다.
+name: Desktop app
+
+on:
+  push:
+    tags: ["desktop-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: --win
+          - os: macos-latest   # Apple Silicon 러너: arm64 와 x64 둘 다 만듦
+            target: --mac
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: desktop
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Syntax check
+        run: npm run check
+
+      - name: Set version and server URL
+        env:
+          SERVER_URL: ${{ vars.CHZZK_SERVER_URL }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/desktop-v* ]]; then
+            npm version --no-git-tag-version --allow-same-version "${GITHUB_REF#refs/tags/desktop-v}"
+          fi
+          if [[ -n "$SERVER_URL" ]]; then npm pkg set chzzkServerUrl="$SERVER_URL"; fi
+          node -p '"version " + require("./package.json").version + ", server " + require("./package.json").chzzkServerUrl'
+
+      - name: Package
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"   # 코드 서명 인증서 없음 (macOS 는 afterPack 에서 ad-hoc 서명)
+        run: npx electron-builder ${{ matrix.target }} --publish never
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chzzk-${{ runner.os }}
+          path: |
+            desktop/dist/*.exe
+            desktop/dist/*.zip
+            desktop/dist/*.dmg
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List files
+        run: ls -la dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: 치지직 데스크톱 ${{ github.ref_name }}
+          body: |
+            Windows(x64·arm64)·macOS(Apple Silicon·Intel) 설치 파일입니다. 설치 방법은 서버의 /download.html 을 참고하세요.
+            - Windows: Chzzk-Setup-win-x64.exe / Chzzk-Setup-win-arm64.exe / Chzzk-win-x64.zip
+            - macOS: Chzzk-mac-arm64.dmg / Chzzk-mac-x64.dmg (+ zip)
+            코드 서명·공증을 하지 않았으므로 처음 실행할 때 OS 확인 창에서 허용이 필요합니다.
+          files: dist/*
+          make_latest: true

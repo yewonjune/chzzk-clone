@@ -43,6 +43,14 @@ final class ApiClient {
     final HttpClient http;
     private String csrfHeader;
     private String csrfToken;
+
+    String csrfHeaderName() {
+        return csrfHeader;
+    }
+
+    String csrfToken() {
+        return csrfToken;
+    }
     JsonNode user;
 
     private ApiClient(String base) {

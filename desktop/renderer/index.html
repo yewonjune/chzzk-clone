@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <!-- 앱 화면 자체의 파일만 실행, 서버(설정한 주소)로의 조회·영상·WebSocket 만 허용 -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:; media-src https: http: blob:; connect-src https: http: wss: ws:">
+  <title>치지직</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="logo" href="#/" data-nav="list"><span class="logo-mark">▶</span>치지<span class="accent">직</span></a>
+    <div class="nav">
+      <span class="server" id="server-label" title="연결한 서버"></span>
+      <button class="btn" type="button" id="btn-refresh">새로고침</button>
+      <button class="btn" type="button" id="btn-settings">서버 설정</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- 목록 -->
+    <section id="list-view">
+      <div class="section-head"><h2>라이브</h2><p class="meta" id="live-count"></p></div>
+      <div class="grid" id="live-grid"></div>
+      <p class="empty-inline" id="live-empty" hidden>지금 진행 중인 방송이 없습니다.</p>
+
+      <div class="section-head"><h2>다시보기</h2><p class="meta" id="replay-count"></p></div>
+      <div class="grid" id="replay-grid"></div>
+      <p class="empty-inline" id="replay-empty" hidden>등록된 다시보기가 없습니다.</p>
+
+      <div class="section-head"><h2>지난 방송</h2></div>
+      <div class="grid" id="ended-grid"></div>
+      <p class="empty-inline" id="ended-empty" hidden>지난 방송 기록이 없습니다.</p>
+    </section>
+
+    <!-- 재생 -->
+    <section id="watch-view" hidden>
+      <button class="btn back" type="button" id="btn-back">← 목록</button>
+      <div class="stage">
+        <video id="player" playsinline></video>
+        <div class="overlay" id="overlay" hidden></div>
+        <div class="hud"><span class="badge" id="badge"></span><span class="badge" id="viewers" hidden></span></div>
+        <button class="btn btn-primary unmute" type="button" id="btn-unmute" hidden>🔊 소리 켜기</button>
+      </div>
+      <h1 class="watch-title" id="title"></h1>
+      <div class="info-row"><span class="streamer" id="streamer"></span><span id="meta"></span></div>
+      <div class="desc" id="desc"></div>
+      <p class="meta web-hint">댓글·후원·로그인은 웹에서 할 수 있습니다. <a href="#" id="open-web">웹에서 열기 ↗</a></p>
+    </section>
+
+    <!-- 서버 설정 -->
+    <dialog id="settings">
+      <form method="dialog" id="settings-form">
+        <h2>서버 설정</h2>
+        <label for="server-input">서버 주소</label>
+        <input id="server-input" type="url" placeholder="https://chzzk-example.com" required>
+        <p class="meta">기본값: <code id="server-default"></code></p>
+        <p class="error" id="settings-error"></p>
+        <div class="controls">
+          <button class="btn btn-primary" type="submit" value="save">저장</button>
+          <button class="btn" type="button" id="btn-reset">기본값으로</button>
+          <button class="btn" type="button" id="btn-close">닫기</button>
+        </div>
+        <p class="meta" id="app-version"></p>
+      </form>
+    </dialog>
+
+    <p class="error" id="error"></p>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

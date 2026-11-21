@@ -1,0 +1,93 @@
+{
+  "name": "chzzk-desktop",
+  "productName": "Chzzk",
+  "version": "1.0.0",
+  "description": "치지직 데스크톱 클라이언트 - 방송 목록 조회와 라이브·다시보기 재생",
+  "author": "yewonjune",
+  "license": "UNLICENSED",
+  "private": true,
+  "main": "main.js",
+  "chzzkServerUrl": "https://chzzk-example.com",
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check main.js && node --check preload.js && node --check renderer/app.js",
+    "dist:win": "electron-builder --win --publish never",
+    "dist:mac": "electron-builder --mac --publish never"
+  },
+  "devDependencies": {
+    "electron": "44.11.5",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "com.chzzk.desktop",
+    "productName": "Chzzk",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Chzzk-win-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "치지직",
+      "buildUniversalInstaller": false,
+      "artifactName": "Chzzk-Setup-win-${arch}.${ext}"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "category": "public.app-category.video",
+      "artifactName": "Chzzk-mac-${arch}.${ext}",
+      "identity": null,
+      "hardenedRuntime": false,
+      "extendInfo": {
+        "CFBundleDisplayName": "치지직"
+      }
+    },
+    "dmg": {
+      "artifactName": "Chzzk-mac-${arch}.${ext}"
+    },
+    "afterPack": "./build/adhoc-sign.cjs"
+  },
+  "allowScripts": {
+    "electron@44.11.5": true
+  }
+}

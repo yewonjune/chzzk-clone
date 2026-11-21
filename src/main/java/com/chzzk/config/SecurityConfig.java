@@ -9,6 +9,7 @@ import org.springframework.http.MediaType;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.ProviderManager;
 import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
+import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
@@ -73,6 +74,8 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.GET, "/api/**").permitAll()
                 .requestMatchers("/api/**").authenticated()
                 .anyRequest().permitAll())   // 정적 화면, /media/**, /ws/** (송출자 권한은 시그널링에서 검사)
+            // 데스크톱 앱 출처의 조회(GET)만 교차 출처 허용 (DesktopCorsConfig)
+            .cors(Customizer.withDefaults())
             .csrf(csrf -> csrf
                 .ignoringRequestMatchers(WEBHOOK) // 브라우저가 아닌 PG 서버의 호출이라 CSRF 토큰이 없음
                 .csrfTokenRepository(csrfTokenRepository)

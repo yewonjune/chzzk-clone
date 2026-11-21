@@ -1,0 +1,126 @@
+# 치지직 6단계: OCI Always Free VM 한 대에 배포 (Docker Compose)
+#
+#   인터넷 ──443/80──▶ caddy (Let's Encrypt 인증서 자동 발급·갱신, HTTP→HTTPS)
+#                        └─▶ app:8080 (Spring Boot, cluster 프로필)
+#                               ├─▶ postgres (기록: 계정·방송·다시보기·댓글·후원)
+#                               ├─▶ redis    (로그인 세션, 방송 방 상태)
+#                               └─ /data/uploads (업로드 영상, 볼륨)
+#   (선택) coturn: 서로 다른 네트워크의 휴대폰 ↔ 시청자 WebRTC 중계   docker compose --profile turn up -d
+#
+# 사용법 (VM 의 저장소 폴더에서):
+#   cp deploy/oci/.env.example deploy/oci/.env   # 값 채우기 (비밀 값은 이 파일에만, git 제외)
+#   docker compose -f deploy/oci/compose.yaml --env-file deploy/oci/.env up -d --build
+#
+# 이미지는 VM 에서 직접 빌드합니다. Dockerfile 의 베이스 이미지(eclipse-temurin)는 arm64 를 지원하므로
+# A1(ARM64) VM 에서도, AMD(x86_64) VM 에서도 같은 명령으로 빌드됩니다.
+
+name: chzzk
+
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: chzzk:oci
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      SPRING_PROFILES_ACTIVE: cluster
+      DB_URL: jdbc:postgresql://postgres:5432/chzzk
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      UPLOAD_DIR: /data/uploads
+      # TLS 는 Caddy 가 끝냄: 앱은 HTTP, 대신 프록시 헤더로 HTTPS 를 인식하고 세션 쿠키는 HTTPS 전용
+      SSL_ENABLED: "false"
+      FORWARD_HEADERS_STRATEGY: native
+      SESSION_COOKIE_SECURE: "true"
+      # 업로드 최대 크기 (Caddy 에는 제한 없음)
+      MAX_UPLOAD_SIZE: ${MAX_UPLOAD_SIZE:-1GB}
+      JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=60 -XX:+ExitOnOutOfMemoryError"
+    volumes:
+      - uploads:/data/uploads
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    # 상태 확인: 앱이 DB·Redis 까지 응답할 때만 healthy (Caddy 는 healthy 가 된 뒤 시작)
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /actuator/health/readiness HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && grep -q '\"UP\"' <&3"]
+      interval: 10s
+      timeout: 5s
+      start_period: 120s
+      retries: 6
+    # 외부에 포트를 열지 않음 (Caddy 를 통해서만 접근)
+    expose: ["8080"]
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: chzzk
+      POSTGRES_USER: ${DB_USERNAME:?DB_USERNAME 을 .env 에 넣으세요}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD 를 .env 에 넣으세요}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d chzzk"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # 세션·방 상태만 담으므로 디스크 저장 없음. REDIS_PASSWORD 가 있으면 비밀번호 요구
+    command: ["sh", "-c", "exec redis-server --save '' --appendonly no $${REDIS_PASSWORD:+--requirepass \"$$REDIS_PASSWORD\"}"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli $${REDIS_PASSWORD:+-a \"$$REDIS_PASSWORD\"} --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: "${DOMAIN:?DOMAIN 을 .env 에 넣으세요, 예 chzzk-example.com}"
+      ACME_EMAIL: "${ACME_EMAIL:?ACME_EMAIL 을 .env 에 넣으세요 (인증서 만료 알림용)}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app: { condition: service_healthy }
+
+  # (선택) TURN 서버: 휴대폰(LTE)과 시청자(다른 집 Wi-Fi)처럼 직접 연결이 안 되는 경우 영상 중계
+  # OCI 보안 목록에 3478/tcp·udp 와 49160-49200/udp 를 열어야 합니다. .env 의 TURN_* 와 함께 사용
+  coturn:
+    image: coturn/coturn:4.6-alpine
+    profiles: ["turn"]
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - -n
+      - --listening-port=3478
+      - --min-port=49160
+      - --max-port=49200
+      - --fingerprint
+      - --lt-cred-mech
+      - --realm=${DOMAIN}
+      - --user=${TURN_USERNAME}:${TURN_PASSWORD}
+      # OCI 는 공인 IP 가 NAT 이므로 "공인IP/사설IP" 로 알려줘야 함
+      - --external-ip=${TURN_EXTERNAL_IP}
+      - --no-cli
+      - --no-tls
+      - --no-dtls
+
+volumes:
+  pgdata:
+  uploads:
+  caddy_data:
+  caddy_config:

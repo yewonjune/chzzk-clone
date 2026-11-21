@@ -1,0 +1,35 @@
+# 치지직 HTTPS 앞단 (Caddy)
+#  - {$DOMAIN} 으로 들어온 요청에 Let's Encrypt 인증서를 자동 발급·갱신 (80 번 포트로 HTTP-01 인증)
+#  - http:// 는 https:// 로 자동 이동
+#  - WebSocket(/ws/**)·Range 요청(영상 구간 탐색)도 그대로 전달
+#  - www.{$DOMAIN} 은 대표 주소로 이동
+{
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy app:8080 {
+		# 영상 업로드처럼 오래 걸리는 요청도 끊지 않음
+		transport http {
+			read_timeout 10m
+			write_timeout 10m
+		}
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+	# 내부 상태 확인 경로는 밖에서 자세히 보이지 않게 (요약 상태만): /actuator/health 만 공개
+	@actuator {
+		path /actuator/*
+		not path /actuator/health /actuator/health/liveness /actuator/health/readiness
+	}
+	respond @actuator 404
+}
+
+www.{$DOMAIN} {
+	redir https://{$DOMAIN}{uri} permanent
+}

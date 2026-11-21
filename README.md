@@ -8,7 +8,8 @@
 | 2단계 | 휴대폰 카메라·마이크 라이브 송출, 방송 목록·시청, 방송 중/종료 상태 표시 |
 | 3단계 | 회원가입·로그인·로그아웃, 소유자 권한(등록·수정·삭제·송출 제어), 댓글(작성·목록·수정·삭제) |
 | 4단계 | 도네이션: 방송자·금액 선택 → **테스트 모드 결제** → 서버가 승인·금액·받는 사람 확인 후 확정, 중복 승인 통지 방지, 방송별 후원 내역·합계 |
-| **5단계 (현재)** | 로컬 오토스케일: 컨테이너 이미지, Docker Desktop Kubernetes 에서 2~5개 인스턴스 + HPA, 상태를 PostgreSQL·Redis·공유 볼륨으로 외부화, 서버가 바뀌어도 방송이 이어지는 재연결 유예 |
+| 5단계 | 로컬 오토스케일: 컨테이너 이미지, Docker Desktop Kubernetes 에서 2~5개 인스턴스 + HPA, 상태를 PostgreSQL·Redis·공유 볼륨으로 외부화, 서버가 바뀌어도 방송이 이어지는 재연결 유예 |
+| **6단계 (현재)** | 도메인·OCI Always Free VM 배포(Docker Compose + Caddy 자동 HTTPS), **Windows·macOS 데스크톱 앱**(Electron, GitHub Actions 로 빌드 → Releases), 다운로드 페이지 `/download.html` |
 
 - 백엔드: Java 17+ · Spring Boot 4.1 (Spring MVC, Spring Data JPA, Spring WebSocket, **Spring Security**)
 - 인증: 서버 세션(쿠키) + BCrypt 비밀번호 + CSRF 토큰 ([ADR-0003](docs/adr/0003-session-auth-with-spring-security.md))
@@ -16,6 +17,8 @@
 - 라이브: **WebRTC** (휴대폰 → 시청자 P2P 직접 전송, 서버는 WebSocket으로 연결 정보와 댓글 알림만 중계)
 - 저장소: 기본은 H2 파일 DB(별도 설치 없이 `data/` 폴더). 여러 인스턴스(`cluster` 프로필)는 **PostgreSQL + Redis(세션·방송 실시간 상태) + 공유 볼륨** ([ADR-0006](docs/adr/0006-shared-state-for-multiple-instances.md))
 - 배포: Docker 이미지 + Docker Desktop 내장 Kubernetes(Deployment·LoadBalancer Service·HPA), 부하는 k6
+- 공개 배포(6단계): OCI VM 한 대에 Docker Compose — Caddy(Let's Encrypt 자동 HTTPS) → 앱(`cluster` 프로필) + PostgreSQL + Redis (+ 선택 coturn) ([ADR-0007](docs/adr/0007-single-vm-compose-with-caddy.md))
+- 데스크톱 앱(6단계): Electron 44 + electron-builder, Windows(x64·arm64)·macOS(arm64·x64), GitHub Actions 빌드 → GitHub Releases
 - 빌드: Gradle (Wrapper 포함, Gradle 설치 불필요)
 - 프론트엔드: 정적 HTML/CSS/JS (`src/main/resources/static`, 빌드 과정 없음)
 
@@ -89,7 +92,16 @@ SWEEP_INTERVAL_MS=10000         # 송출 연결 없는 방송·만료된 시청�
 HEARTBEAT_INTERVAL=5s           # (cluster) 인스턴스 하트비트 갱신 주기
 HEARTBEAT_TTL=15s               # (cluster) 하트비트가 이만큼 끊기면 그 인스턴스의 연결 기록을 정리
 SHUTDOWN_PHASE_TIMEOUT=90s      # 종료 신호를 받은 뒤 진행 중인 요청(업로드 등)을 마무리하는 최대 시간
+
+# 6단계: 공개 배포·데스크톱 앱
+FORWARD_HEADERS_STRATEGY=native # 앞단 프록시(Caddy·터널)의 X-Forwarded-* 반영 (사설망·localhost 프록시만 신뢰)
+SESSION_COOKIE_SECURE=          # 비우면 SSL_ENABLED 와 같음. TLS 를 프록시가 끝내면 true
+DESKTOP_ORIGINS=app://chzzk     # 데스크톱 앱 화면 출처: 조회 API·시청 WebSocket 허용
+DESKTOP_DOWNLOAD_BASE=https://github.com/yewonjune/chzzk-clone/releases/latest/download   # 설치 파일 위치
+DESKTOP_RELEASES_PAGE=https://github.com/yewonjune/chzzk-clone/releases
 ```
+
+OCI 배포(Compose)용 값 — 도메인, 인증서 알림 이메일, DB 비밀번호, TURN 등 — 은 [`deploy/oci/.env.example`](deploy/oci/.env.example)을 VM 에서 `deploy/oci/.env` 로 복사해 채웁니다(git 제외).
 
 **`cluster` 프로필** (`SPRING_PROFILES_ACTIVE=cluster`, Kubernetes 에서는 `k8s/app.yaml` 이 설정)에서만 쓰는 값입니다. 빠지면 서버가 시작하지 않습니다.
 
@@ -151,6 +163,128 @@ kubectl -n chzzk get pods,svc,hpa
 - 코드를 바꾼 뒤: 2) 의 이미지 빌드 → `kubectl -n chzzk rollout restart deployment/chzzk`
 - 전부 지우기(DB·업로드 데이터 포함): `kubectl delete namespace chzzk`
 
+## 공개 서비스 배포 (6단계: 도메인 · OCI Always Free VM · HTTPS)
+
+### 공개 주소와 도메인
+
+| 항목 | 내용 |
+| --- | --- |
+| 서비스 주소 | `https://<도메인>` — **도메인 구매·배포 후 기입** |
+| 다운로드 페이지 | `https://<도메인>/download.html` |
+| 상태 확인 | `https://<도메인>/actuator/health` (`{"status":"UP"}`), `/actuator/health/readiness`, `/actuator/health/liveness` |
+| 데스크톱 앱 파일 | https://github.com/yewonjune/chzzk-clone/releases/latest |
+| 도메인 등록 여부 | **미등록 (구매 후 기입)** — 등록처: ___ , 등록일: ___ |
+| 최초 등록 비용 | ___ 원 (구매 영수증 기준으로 기입. 결제 정보는 적지 않음) |
+| 갱신 비용 | ___ 원/년 (등록처의 갱신 가격 표 기준으로 기입) |
+
+> 아직 도메인을 사지 않았고 VM 도 만들지 않았으므로 위 값은 비어 있습니다. 아래 절차대로 진행한 뒤 실제 값으로 바꿉니다. 가격은 등록처·TLD·환율·프로모션에 따라 달라서 예상값을 적지 않았습니다(처음 1년 할인 뒤 갱신가가 오르는 경우가 많으니 **갱신 가격을 꼭 같이 확인**).
+
+### 구성
+
+```
+ 인터넷 ── DNS: <도메인> A 레코드 → VM 공인 IP
+   │ 80/443 (OCI 보안 목록 + VM iptables 허용)
+   ▼
+ OCI VM (Ubuntu, Docker Compose)  deploy/oci/compose.yaml
+   caddy  :80 → https 이동, :443 TLS 종료 (Let's Encrypt 자동 발급·갱신)
+     └─▶ app:8080  Spring Boot (cluster 프로필, 프록시 헤더로 https 인식, 세션 쿠키 Secure)
+           ├─ postgres  기록 (볼륨 pgdata)
+           ├─ redis     로그인 세션·방송 방 상태
+           └─ uploads   업로드 영상 (볼륨)
+   (선택) coturn  3478 + 49160-49200/udp  WebRTC 중계
+```
+
+### 1) OCI Always Free VM 만들기
+
+1. OCI 콘솔 → 오른쪽 위 리전이 **홈 리전**인지 확인 (Always Free 자원은 홈 리전에서만 생성).
+2. **거버넌스 → 한도, 할당량 및 사용량**에서 `Compute` 서비스의 *Standard A1 core / memory* 잔여 한도와, 이미 쓰고 있는 A1 인스턴스가 있는지 확인합니다.
+3. **컴퓨트 → 인스턴스 → 인스턴스 생성**
+   - 이미지: **Canonical Ubuntu 24.04** (aarch64 빌드가 자동 선택됨)
+   - 구성(Shape): **Ampere → VM.Standard.A1.Flex, 2 OCPU · 12 GB** (Always Free 지원 표시 확인)
+   - 네트워킹: 새 VCN·공용 서브넷, **공용 IPv4 주소 할당**
+   - SSH 키: 내 공개 키 붙여넣기(또는 키 쌍 내려받기 — 개인 키는 저장소에 넣지 않음)
+   - 부트 볼륨: 기본 50GB (Always Free 블록 스토리지 범위 안)
+4. "**Out of capacity / 용량 부족**"이 나오면: 다른 가용성 도메인(AD)으로 다시 시도 → 시간을 두고 재시도 → 그래도 안 되면 아래 **Micro 대안**.
+5. 인스턴스의 **공인 IP**를 기록합니다.
+6. **네트워킹 → VCN → 보안 목록(Default Security List) → 수신 규칙 추가**: 소스 `0.0.0.0/0`, TCP **80**, TCP **443**, UDP **443**(HTTP/3). TURN 을 쓰면 TCP/UDP **3478**, UDP **49160-49200**.
+
+**선택 기록** (배포 후 기입): 홈 리전 ___, A1 잔여 한도 ___, 생성한 구성 ___, 재고 문제 여부 ___.
+
+**Micro 대안** — A1 재고가 계속 없을 때: `VM.Standard.E2.1.Micro`(AMD, 1/8 OCPU, 1GB, Always Free) 한 대에서 PostgreSQL·Redis 없이 H2 로 실행합니다. 메모리가 1GB 라 이미지 빌드 전에 스왑을 만들고, `compose.micro.yaml` 을 덧씌웁니다.
+```bash
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+docker compose -f deploy/oci/compose.yaml -f deploy/oci/compose.micro.yaml --env-file deploy/oci/.env up -d --build
+```
+A1 을 우선하는 이유: 서버(JVM)·PostgreSQL·Redis·Caddy·이미지 빌드를 한 대에서 돌리기에 1GB 는 빠듯하고, ARM 이미지도 같은 Dockerfile 로 빌드되기 때문입니다.
+
+### 2) 도메인 구매와 DNS
+
+1. 도메인 등록처(예: 가비아, Cloudflare Registrar, Porkbun, Namecheap 등)에서 도메인을 구매합니다. **결제는 본인이 직접** 하고, 영수증의 최초 등록 비용과 등록처의 갱신 비용을 위 표에 기입합니다.
+2. 등록처(또는 사용하는 DNS 서비스)의 DNS 관리에서 레코드를 추가합니다.
+
+| 유형 | 이름 | 값 | TTL |
+| --- | --- | --- | --- |
+| A | `@` | VM 공인 IP | 300 |
+| CNAME | `www` | `<도메인>` | 300 |
+
+   Cloudflare DNS 를 쓰면 처음에는 **프록시 끔(회색 구름, DNS only)** 으로 두세요. Caddy 가 80번 포트로 직접 인증서를 받아야 하고, WebSocket·업로드 크기 제한도 피할 수 있습니다.
+3. 반영 확인: `nslookup <도메인>` 결과가 VM 공인 IP 인지 확인합니다(보통 수 분, 길면 수 시간).
+
+### 3) VM 에 배포
+
+```bash
+ssh ubuntu@<VM 공인 IP>
+curl -fsSL https://raw.githubusercontent.com/yewonjune/chzzk-clone/main/deploy/oci/setup-vm.sh -o setup-vm.sh
+bash setup-vm.sh            # Docker 설치 + iptables 80/443 허용 + 저장소 받기 (TURN 도 열려면 --turn)
+exit                        # docker 그룹 반영을 위해 다시 접속
+ssh ubuntu@<VM 공인 IP>
+cd ~/chzzk-clone
+nano deploy/oci/.env        # DOMAIN, ACME_EMAIL, DB_PASSWORD (+ 선택 TURN_*, TOSS_* 테스트 키)
+docker compose -f deploy/oci/compose.yaml --env-file deploy/oci/.env up -d --build
+docker compose -f deploy/oci/compose.yaml --env-file deploy/oci/.env ps        # app 이 healthy, caddy 가 running
+docker compose -f deploy/oci/compose.yaml --env-file deploy/oci/.env logs -f caddy   # "certificate obtained successfully"
+```
+
+- 첫 빌드는 A1 에서 수 분 걸립니다(Gradle 의존성). 이후 코드 갱신: `git pull && docker compose ... up -d --build app`
+- **비밀 값**: `deploy/oci/.env`(권한 600, git 제외)에만 둡니다. 저장소에는 [`deploy/oci/.env.example`](deploy/oci/.env.example)(예시 값)만 있습니다.
+- **TLS 구성**: Caddy 가 `DOMAIN` 으로 Let's Encrypt 인증서를 자동 발급(HTTP-01, 80번 포트)·갱신하고 볼륨 `caddy_data` 에 보관합니다. 앱은 내부 HTTP 로만 받고, `X-Forwarded-Proto` 로 HTTPS 를 인식합니다. 설정: [`deploy/oci/Caddyfile`](deploy/oci/Caddyfile)
+- **TURN(선택)**: 휴대폰(LTE)과 시청자가 다른 네트워크라 영상이 안 붙으면 `.env` 에 `TURN_URL=turn:<도메인>:3478`, `TURN_USERNAME`, `TURN_PASSWORD`, `TURN_EXTERNAL_IP=<공인IP>/<사설IP>` 를 넣고 `docker compose ... --profile turn up -d`
+- 데이터 백업: `docker compose ... exec postgres pg_dump -U chzzk chzzk > backup.sql`
+
+## 데스크톱 클라이언트 (6단계)
+
+### 내려받기·설치
+
+공개 다운로드 페이지 **`https://<도메인>/download.html`** 에서 OS 에 맞는 파일을 받습니다(파일은 GitHub Releases 에 있음).
+
+| OS | 아키텍처 | 파일 | 설치·실행 |
+| --- | --- | --- | --- |
+| Windows 10/11 | x64 | `Chzzk-Setup-win-x64.exe` | 실행 → "Windows의 PC 보호" 창에서 **추가 정보 → 실행** → 설치 → 바탕화면 **치지직** |
+| Windows 10/11 | x64 | `Chzzk-win-x64.zip` | 압축 풀고 `Chzzk.exe` 실행 (설치 없음) |
+| Windows 11 | arm64 | `Chzzk-Setup-win-arm64.exe` | x64 와 같음 |
+| macOS 12+ | arm64 (Apple Silicon) | `Chzzk-mac-arm64.dmg` / `.zip` | dmg 열기 → Chzzk 를 Applications 로 → 처음 실행이 막히면 **시스템 설정 → 개인정보 보호 및 보안 → 그래도 열기** (14 이하는 Control-클릭 → 열기). "손상됨"이 뜨면 `xattr -dr com.apple.quarantine /Applications/Chzzk.app` |
+| macOS 12+ | x64 (Intel) | `Chzzk-mac-x64.dmg` / `.zip` | arm64 와 같음 |
+
+코드 서명 인증서가 없어(유료) 처음 실행할 때 OS 확인이 한 번 필요합니다. 앱은 처음부터 빌드 때 지정한 서버에 연결되며, 오른쪽 위 **서버 설정**에서 바꿀 수 있습니다.
+
+### 빌드·릴리스
+
+```bash
+# 저장소 Settings → Secrets and variables → Actions → Variables 에 CHZZK_SERVER_URL=https://<도메인> 추가 (비밀 아님)
+git tag desktop-v1.0.0
+git push origin desktop-v1.0.0
+# → Actions "Desktop app" 이 windows-latest·macos-latest 에서 빌드 → Releases 에 7개 파일 첨부
+```
+
+로컬에서 직접 빌드 (Node.js 22+):
+```bash
+cd desktop
+npm ci                      # npm 11 이 설치 스크립트를 막으면 package.json 의 allowScripts(electron) 로 허용됨
+npm start                   # 개발 실행 (기본 서버는 package.json 의 chzzkServerUrl)
+npm run dist:win            # Windows 에서 → desktop/dist/*.exe, *.zip
+npm run dist:mac            # macOS 에서 → desktop/dist/*.dmg, *.zip (macOS 패키지는 macOS 에서만 빌드 가능)
+```
+
 ## 공개 범위와 권한
 
 **시청과 목록 조회는 로그인 없이 누구나** 할 수 있습니다. 방송·다시보기 목록과 상세, 영상 재생, 라이브 시청, **댓글 목록 읽기**가 모두 공개입니다. 스트리밍 사이트로서 처음 온 사람도 볼 수 있어야 하고, 시청 자체로는 누구의 데이터도 바뀌지 않기 때문입니다. 응답에는 사용자의 **닉네임과 번호만** 담기고, 로그인 아이디·비밀번호 해시는 어떤 응답에도 포함되지 않습니다.
@@ -180,7 +314,28 @@ kubectl -n chzzk get pods,svc,hpa
 
 ## 이번 단계 구현 범위
 
-**5단계에서 구현함 — 로컬 오토스케일**
+**6단계에서 구현함 — 도메인·OCI 배포와 Windows/macOS 클라이언트**
+- **배포 설정** ([`deploy/oci/`](deploy/oci/)): VM 한 대에서 `docker compose up -d --build` 로 전체 실행
+  - Caddy: 도메인으로 Let's Encrypt 인증서 **자동 발급·갱신**, HTTP→HTTPS 이동, HSTS, WebSocket·영상 Range 요청 전달, `/actuator/*` 중 health 외 차단
+  - 앱: 5단계 `cluster` 프로필(PostgreSQL 기록, Redis 세션·방 상태, 업로드 볼륨) 그대로 → 계정·방송·댓글·후원 기능 유지
+  - (선택) coturn TURN 서버: 휴대폰 LTE ↔ 다른 집 PC 처럼 직접 연결이 안 되는 시청을 중계
+  - `setup-vm.sh`: Docker 설치, OCI Ubuntu 이미지의 iptables 에 80/443(+TURN) 허용, 저장소 받기
+- **서버 변경**
+  - 프록시 뒤 HTTPS 인식: `server.forward-headers-strategy=native` (사설망·localhost 프록시의 `X-Forwarded-*` 만 신뢰), 세션 쿠키 `Secure` 를 `SESSION_COOKIE_SECURE` 로 따로 지정
+  - 데스크톱 앱 출처(`app://chzzk`, `DESKTOP_ORIGINS`)에 한해 **조회(GET)만 CORS 허용**(쿠키 없음)·**시청 WebSocket 허용**. 다른 출처·상태 변경은 이전과 같이 막힘
+  - 상태 확인 경로: `/actuator/health`, `/actuator/health/liveness`, `/actuator/health/readiness`(DB·Redis 포함) — Compose healthcheck 가 readiness 로 판단하고, Caddy 는 앱이 healthy 가 된 뒤 시작
+  - 다운로드 목록 API `GET /api/downloads` + 다운로드 페이지 **`/download.html`** (OS별 파일 링크, 지원 아키텍처, 설치·실행 방법, 접속한 기기에 맞는 파일 추천). 메인 화면 오른쪽 위 **⬇ 앱**
+  - 배포 주소·비밀 값은 모두 환경변수(`deploy/oci/.env`, git 제외)
+- **데스크톱 앱** ([`desktop/`](desktop/), Electron)
+  - 방송 목록(라이브·다시보기·지난 방송, 10초마다 갱신) → 카드를 누르면 재생
+  - 다시보기: 서버 영상 재생(구간 탐색), 라이브: 웹 시청 화면과 같은 시그널링으로 **WebRTC 시청**(자동 재연결, 시청자 수, 방송 종료 표시)
+  - 서버 주소: 빌드할 때 넣은 기본값(`CHZZK_SERVER_URL`) + 앱의 **서버 설정**에서 변경 가능
+  - 보안: 화면은 `app://chzzk` 로만 로드, contextIsolation·sandbox, CSP, 외부 링크는 기본 브라우저로. 댓글·후원·송출은 웹으로 안내(앱은 시청 전용)
+  - 패키지: Windows `Chzzk-Setup-win-x64.exe`·`Chzzk-Setup-win-arm64.exe`(NSIS 설치), `Chzzk-win-x64.zip`(설치 없이), macOS `Chzzk-mac-arm64.dmg`·`Chzzk-mac-x64.dmg`(+zip). 코드 서명 인증서 없음 — macOS 는 ad-hoc 서명(Apple Silicon 실행용), 공증 없음
+  - [`.github/workflows/desktop.yml`](.github/workflows/desktop.yml): `desktop-v*` 태그를 push 하면 Windows·macOS 러너가 빌드해 **GitHub Releases** 에 올림 (파일 이름에 버전이 없어 `releases/latest/download/<파일>` 이 항상 최신)
+- **자동 테스트**: 기본 23개 (+ `DesktopAccessTest` 2개: 데스크톱 출처 조회·시청 허용, 다른 출처·상태 변경 차단, 프록시 뒤 HTTPS 요청의 같은 출처 인식)
+
+**5단계에서 구현함 — 로컬 오토스케일 (유지)**
 - **컨테이너 이미지**: 멀티스테이지 `Dockerfile` (JDK 17 로 빌드 → JRE 17 로 실행, root 아닌 사용자). Docker 만 있으면 빌드
 - **여러 인스턴스 실행**: Docker Desktop 내장 Kubernetes 에 `k8s/` 적용 → 서버 Deployment(`cluster` 프로필), PostgreSQL, Redis, 업로드 공유 볼륨
 - **자동 확장·축소**: HPA — **평균 CPU 50%** 목표, **최소 2 ~ 최대 5개**, 부하가 사라지면 60초 지켜본 뒤 축소 (metrics-server 사용)
@@ -205,7 +360,9 @@ kubectl -n chzzk get pods,svc,hpa
 - 2단계: 휴대폰 송출(카메라 전환·마이크 끄기·종료), WebRTC 시청, 방송 중/종료 상태, 끊김 시 종료(5단계부터 재연결 유예 뒤), 시청자 상한, HTTPS·STUN/TURN 설정
 - 1단계: 다시보기 등록(파일 업로드·외부 주소), 목록·상세·재생(구간 탐색), 조회수, 재시작 후 유지
 
-**이번 단계에서 하지 않음**: 클라우드 배포·원격 레지스트리·Ingress, 오브젝트 스토리지(MinIO/S3), PostgreSQL·Redis 고가용성(Redis 재시작 시 모두 로그아웃), 요청 수 등 사용자 정의 지표 스케일링, 스키마 마이그레이션 도구, H2 → PostgreSQL 데이터 이전, 송출 화면 새로고침 후 같은 방송 이어받기
+**6단계에서 하지 않음**: 코드 서명·Apple 공증(유료 인증서 필요), 앱 자동 업데이트, 데스크톱 앱에서 로그인·댓글·후원·송출, 여러 VM·클라우드 로드밸런서, DB 자동 백업, Linux 데스크톱 패키지
+
+**5단계에서 하지 않음**: 원격 레지스트리·Ingress, 오브젝트 스토리지(MinIO/S3), PostgreSQL·Redis 고가용성(Redis 재시작 시 모두 로그아웃), 요청 수 등 사용자 정의 지표 스케일링, 스키마 마이그레이션 도구, H2 → PostgreSQL 데이터 이전, 송출 화면 새로고침 후 같은 방송 이어받기
 
 ## 도네이션 결제 설정
 
@@ -295,6 +452,36 @@ cloudflared tunnel --url http://localhost:8080
 - 방송을 시작하려면 휴대폰에서도 **로그인**해야 합니다(시청은 로그인 불필요).
 
 ## 직접 확인 절차
+
+### F. 공개 배포·데스크톱 앱 (6단계) — 외부 네트워크에서 도메인·HTTPS·다운로드·재생
+
+**서버 (휴대폰 LTE 처럼 VM 과 다른 네트워크에서)**
+1. `nslookup <도메인>` → VM 공인 IP.
+2. 브라우저로 `http://<도메인>` → 자동으로 `https://<도메인>` 으로 이동, 주소창 자물쇠 → 인증서 발급자 **Let's Encrypt**, 만료일 확인.
+3. `https://<도메인>/actuator/health` → `{"status":"UP"}`.
+4. 웹에서 회원가입 → 다시보기 등록 → 재생, 댓글, 후원(테스트 결제) → 1~5단계 기능이 도메인에서 동작하는지 확인.
+5. 휴대폰에서 `https://<도메인>/go-live.html` → 로그인 → 방송 시작 (정식 인증서라 경고 없이 카메라 허용 창이 뜸).
+
+**데스크톱 앱 (Windows PC 와 Mac 각각)**
+1. `https://<도메인>/download.html` → 내 기기에 맞는 추천 버튼, 표에 OS별 파일·아키텍처, 설치 방법이 보이는지 확인.
+2. 파일 링크로 내려받기 → 위 [데스크톱 클라이언트](#데스크톱-클라이언트-6단계) 표대로 설치·실행.
+3. 앱 오른쪽 위에 `<도메인>` 이 보이고 **라이브·다시보기·지난 방송** 목록이 웹과 같은지 확인.
+4. 다시보기 카드 → 영상 재생, 진행 막대로 구간 이동.
+5. 휴대폰으로 방송을 켠 상태에서 앱의 라이브 카드 → 영상·소리 재생, 시청자 수 증가, 휴대폰에서 종료하면 앱에 "방송이 종료되었습니다".
+
+**결과 기록**
+
+| 확인 | OS / 아키텍처 | 네트워크 | 결과 | 날짜 |
+| --- | --- | --- | --- | --- |
+| 자동 테스트 `./gradlew test` (23개, 데스크톱 출처 CORS·WebSocket·프록시 HTTPS 인식 포함) | Windows 11 / x64 (JDK 25) | 로컬 | ✅ 통과 | 2026-11-21 |
+| Windows 패키지 빌드 (`npm run dist:win`): `Chzzk-Setup-win-x64.exe`·`Chzzk-Setup-win-arm64.exe`·`Chzzk-win-x64.zip` | Windows 11 / x64 | 로컬 | ✅ 생성됨 | 2026-11-21 |
+| 빌드된 Windows 앱(`win-unpacked/Chzzk.exe`) → 로컬 서버: 목록 조회, 다시보기 재생(5초 영상 끝까지), 라이브 WebRTC 시청(시청자 1명) | Windows 11 / x64 | 로컬 (`http://localhost:8080`) | ✅ 동작 | 2026-11-21 |
+| 도메인 HTTP→HTTPS, 인증서, `/actuator/health` | ___ | 외부 (___) | ⬜ 배포 후 기입 | |
+| 다운로드 페이지 → Windows 설치 파일 받기·설치·실행, 목록·다시보기·라이브 | Windows ___ / ___ | 외부 | ⬜ 배포 후 기입 | |
+| 다운로드 페이지 → macOS dmg 받기·실행(Gatekeeper 허용), 목록·다시보기·라이브 | macOS ___ / ___ | 외부 | ⬜ 배포 후 기입 | |
+| GitHub Actions 빌드 → Releases 7개 파일 | windows-latest, macos-latest | — | ⬜ 태그 push 후 기입 | |
+
+> 위 ✅ 세 줄은 실제로 실행한 결과입니다. 도메인·VM·macOS 는 아직 준비되지 않아 ⬜ 로 남겨 두었고, 진행한 뒤 OS 버전·아키텍처·결과를 채웁니다. 앱이 서버와 실제로 통신하는지는 사람 없이도 확인할 수 있습니다: `CHZZK_SMOKE=1 CHZZK_SMOKE_OPEN=replay/1 Chzzk.exe` → 표준 출력에 목록 개수와 재생 상태(`readyState`, `currentTime`)가 찍히고 종료됩니다.
 
 ### E. 로컬 오토스케일 (5단계) — 부하에 따라 늘고 줄기, 그동안 상태 유지
 
@@ -497,7 +684,8 @@ watch ✓ [ 100% ] 1 VUs      10m0s
 3. 메인 아래쪽 **다시보기** 영역에 카드(썸네일, `0:05`, 조회수)가 보이는지 확인합니다.
 4. 서버를 종료하고 다시 실행 → 계정·다시보기·종료된 방송 기록·댓글이 그대로 남아 있는지 확인합니다. (재시작 전에 방송 중이던 방송은 송출 화면이 다시 붙지 않으면 재연결 유예 뒤 **종료**로 바뀌고, 기본 프로필의 로그인 세션은 재시작 시 초기화되어 다시 로그인해야 합니다.)
 
-자동 검증: `./gradlew test` — 실제 서버를 임시 폴더로 띄워 확인합니다(총 21개, Docker 불필요).
+자동 검증: `./gradlew test` — 실제 서버를 임시 폴더로 띄워 확인합니다(총 23개, Docker 불필요).
+- `DesktopAccessTest`(2): 데스크톱 출처(`app://chzzk`)의 조회 CORS·시청 WebSocket 허용, 다른 출처 WebSocket 거절·상태 변경 사전 요청 거절, 다운로드 목록, 프록시 헤더(`X-Forwarded-Proto: https`) 뒤 같은 출처 POST 허용
 - `DonationFlowTest`(6): 주문 검증·권한, 성공 후 중복 승인 통지 1회 적립, 동시 승인 요청, 금액 변조, 실패·취소, 웹훅 PG 재조회·환불
 - `PermissionTest`(6): 가입·로그인·로그아웃, CSRF, 다시보기·방송·댓글 권한 매트릭스, 댓글 페이지네이션
 - `BroadcastFlowTest`(6): 소유자만 송출, 시그널링, 방송 중 댓글·제목 실시간 전달, 시청자 상한, 끊김 뒤 재연결 유예·종료, viewerId 로 이어 붙기, 동시 종료 한 번, 서버 종료 시 4001
@@ -528,6 +716,7 @@ watch ✓ [ 100% ] 1 VUs      10m0s
 | `POST` | `/api/broadcasts/{id}/end` 👑 | 방송 종료 |
 | `DELETE` | `/api/broadcasts/{id}` 👑 | 종료된 방송 기록 삭제(댓글 포함) → 204, 방송 중이면 409 |
 | `GET` | `/api/live-config` | WebRTC ICE 서버(STUN/TURN)·시청자 상한 |
+| `GET` | `/api/downloads` | 데스크톱 앱 설치 파일 목록 `{releasesPage, assets:[{os, arch, kind, file, url, note}]}` (6단계, 다운로드 페이지가 사용) |
 | `WS` | `/ws/broadcasts/{id}` | 시그널링. 첫 메시지 `{"type":"join","role":"host"}` 👑 또는 `{"type":"join","role":"viewer"}`. 방송 중 `comment`·`title` 알림 수신 |
 
 **다시보기**
@@ -569,6 +758,7 @@ watch ✓ [ 100% ] 1 VUs      10m0s
 
 ## 설계 문서
 
+- [docs/stage6-design.md](docs/stage6-design.md) — 6단계 배포 구조(OCI·Caddy·DNS·TLS), 데스크톱 앱 구조·보안, 빌드·배포 파이프라인
 - [docs/stage5-design.md](docs/stage5-design.md) — 5단계 아키텍처, 상태별 저장 위치, 스케일·장애 시나리오, 배포 구성
 - [docs/stage4-design.md](docs/stage4-design.md) — 4단계 아키텍처, ERD, 기술적 고민 및 개선 (결제 확정·중복 방지)
 - [docs/stage3-design.md](docs/stage3-design.md) — 3단계 설계 (인증·인가·댓글)
@@ -591,16 +781,21 @@ src/main/java/com/chzzk/
   payment/                      결제 서비스 연동: PaymentGateway, 토스페이먼츠 테스트 모드, 내장 테스트 PG(DB 저장)
   config/                       Spring Security, /media/** 영상 제공, WebSocket, 이전 단계 DB 호환
   common/                       공통 예외·오류 응답, 소유자 검사(Ownership), 커밋 후 실행(AfterCommit)
+  desktop/                      데스크톱 앱 출처 설정·조회 전용 CORS, 다운로드 목록 API
 src/main/resources/
   application.properties        설정 (환경변수 기본값)
   application-cluster.properties  여러 인스턴스용: PostgreSQL · Redis 세션 · 공유 업로드 폴더
   static/                       메인(index) · 로그인(auth) · 방송 시작(go-live) · 방송 시청(live) · 다시보기(replay, upload) · 댓글 위젯(comments.js)
+                                데스크톱 앱 다운로드(download)
                                 후원(donate) · 후원 결과(donate-result) · 내장 테스트 결제창(fake-pg) · 후원 위젯(donations.js)
 src/test/java/                  통합 테스트 (ApiClient: 사용자별 세션·CSRF 를 가진 테스트용 클라이언트)
                                 Cluster*Test: Testcontainers 로 PostgreSQL·Redis + 서버 2대 (./gradlew clusterTest)
 Dockerfile, .dockerignore       컨테이너 이미지
 k8s/                            Kubernetes 배포 (namespace · PostgreSQL · Redis · 업로드 PVC · 서버 · Service · HPA)
 load/autoscale.js               k6 부하 스크립트
+deploy/oci/                     6단계 OCI VM 배포: compose.yaml(Caddy·앱·PostgreSQL·Redis·coturn) · Caddyfile · .env.example · setup-vm.sh · compose.micro.yaml
+desktop/                        6단계 데스크톱 앱 (Electron): main.js · preload.js · renderer/(목록·재생 화면) · build/adhoc-sign.cjs
+.github/workflows/desktop.yml   Windows·macOS 패키지 빌드 → GitHub Releases
 samples/                        확인용 샘플 영상
 data/, certs/                   (git 제외) DB·업로드 파일, HTTPS 인증서
 ```
