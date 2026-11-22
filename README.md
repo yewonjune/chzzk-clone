@@ -173,11 +173,11 @@ kubectl -n chzzk get pods,svc,hpa
 | 다운로드 페이지 | `https://yewonjune.com/download.html` |
 | 상태 확인 | `https://yewonjune.com/actuator/health` (`{"status":"UP"}`), `/actuator/health/readiness`, `/actuator/health/liveness` |
 | 데스크톱 앱 파일 | https://github.com/yewonjune/chzzk-clone/releases/latest |
-| 도메인 등록 여부 | **등록함** (`yewonjune.com`) — 등록처: ___ , 등록일: ___ , 네임서버: `ns1~ns4.hosting.co.kr` |
-| 최초 등록 비용 | ___ 원 (구매 영수증 기준으로 기입. 결제 정보는 적지 않음) |
-| 갱신 비용 | ___ 원/년 (등록처의 갱신 가격 표 기준으로 기입) |
+| 도메인 등록 여부 | **등록함** (`yewonjune.com`) — 등록처: 호스팅케이알(hosting.kr), 등록일: 2026-11-21, 네임서버: `ns1~ns4.hosting.co.kr` |
+| 최초 등록 비용 | 21,670원 (1년, 구매 영수증 기준) |
+| 갱신 비용 | 23,000원/년 (등록처 갱신 가격 기준) |
 
-> 도메인은 등록했고, VM 생성·배포는 아직 진행 전입니다. 비어 있는 값은 아래 절차대로 진행한 뒤 실제 값으로 바꿉니다. 가격은 등록처·TLD·환율·프로모션에 따라 달라서 예상값을 적지 않았습니다(처음 1년 할인 뒤 갱신가가 오르는 경우가 많으니 **갱신 가격을 꼭 같이 확인**).
+> DNS 는 호스팅케이알 네임서버에서 관리합니다: `@` A 레코드 → VM 공인 IP `161.33.4.50`, `www` CNAME → `yewonjune.com` (등록 직후 있던 등록처 기본 A 레코드는 삭제). 최초 등록비보다 갱신비가 비싸므로 매년 갱신 비용은 23,000원 기준입니다.
 
 ### 구성
 
@@ -208,7 +208,16 @@ kubectl -n chzzk get pods,svc,hpa
 5. 인스턴스의 **공인 IP**를 기록합니다.
 6. **네트워킹 → VCN → 보안 목록(Default Security List) → 수신 규칙 추가**: 소스 `0.0.0.0/0`, TCP **80**, TCP **443**, UDP **443**(HTTP/3). TURN 을 쓰면 TCP/UDP **3478**, UDP **49160-49200**.
 
-**선택 기록** (배포 후 기입): 홈 리전 ___, A1 잔여 한도 ___, 생성한 구성 ___, 재고 문제 여부 ___.
+**선택 기록**
+
+| 항목 | 내용 |
+| --- | --- |
+| 홈 리전 | Japan Central (Osaka) |
+| A1 시도 결과 | `VM.Standard.A1.Flex` 생성 시 **Out of capacity** — 다른 가용성 도메인·시간을 두고 재시도했지만 계속 실패 |
+| A1 잔여 한도 | `standard-a1-core-count` — Service Limit: **Dynamic**, Available: **Dynamic** (고정 숫자가 아니라 리전 재고에 따라 달라지는 한도로 표시됨. 계정 안에 다른 A1 인스턴스는 없음) |
+| 생성한 구성 | **`VM.Standard.E2.1.Micro`** (AMD x86_64, 1/8 OCPU, 메모리 1GB, Always Free), Ubuntu, 공인 IP 1개 |
+| 실행 방식 | 2GB 스왑 추가 후 `compose.yaml` + `compose.micro.yaml` (앱 + Caddy, DB 는 H2 파일 — PostgreSQL·Redis 없음) |
+| 선택 이유 | A1 재고가 없어 Always Free 안에서 바로 만들 수 있는 유일한 대안. 메모리가 작아 PostgreSQL·Redis 를 빼고 H2 로 운영하며, 첫 이미지 빌드는 스왑 없이는 메모리 부족으로 VM 이 멈춰 스왑을 먼저 만든다 |
 
 **Micro 대안** — A1 재고가 계속 없을 때: `VM.Standard.E2.1.Micro`(AMD, 1/8 OCPU, 1GB, Always Free) 한 대에서 PostgreSQL·Redis 없이 H2 로 실행합니다. 메모리가 1GB 라 이미지 빌드 전에 스왑을 만들고, `compose.micro.yaml` 을 덧씌웁니다.
 ```bash
