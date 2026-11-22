@@ -9,7 +9,7 @@
 | 3단계 | 회원가입·로그인·로그아웃, 소유자 권한(등록·수정·삭제·송출 제어), 댓글(작성·목록·수정·삭제) |
 | 4단계 | 도네이션: 방송자·금액 선택 → **테스트 모드 결제** → 서버가 승인·금액·받는 사람 확인 후 확정, 중복 승인 통지 방지, 방송별 후원 내역·합계 |
 | 5단계 | 로컬 오토스케일: 컨테이너 이미지, Docker Desktop Kubernetes 에서 2~5개 인스턴스 + HPA, 상태를 PostgreSQL·Redis·공유 볼륨으로 외부화, 서버가 바뀌어도 방송이 이어지는 재연결 유예 |
-| **6단계 (현재)** | 도메인·OCI Always Free VM 배포(Docker Compose + Caddy 자동 HTTPS), **Windows·macOS 데스크톱 앱**(Electron, GitHub Actions 로 빌드 → Releases), 다운로드 페이지 `/download.html` |
+| **6단계 (현재)** | 도메인·OCI Always Free VM 배포(Docker Compose + Caddy 자동 HTTPS — A1 재고 부족으로 실제 배포는 **E2.1.Micro + H2**), **Windows·macOS 데스크톱 앱**(Electron, GitHub Actions 로 빌드 → Releases), 다운로드 페이지 `/download.html` |
 
 - 백엔드: Java 17+ · Spring Boot 4.1 (Spring MVC, Spring Data JPA, Spring WebSocket, **Spring Security**)
 - 인증: 서버 세션(쿠키) + BCrypt 비밀번호 + CSRF 토큰 ([ADR-0003](docs/adr/0003-session-auth-with-spring-security.md))
@@ -17,7 +17,9 @@
 - 라이브: **WebRTC** (휴대폰 → 시청자 P2P 직접 전송, 서버는 WebSocket으로 연결 정보와 댓글 알림만 중계)
 - 저장소: 기본은 H2 파일 DB(별도 설치 없이 `data/` 폴더). 여러 인스턴스(`cluster` 프로필)는 **PostgreSQL + Redis(세션·방송 실시간 상태) + 공유 볼륨** ([ADR-0006](docs/adr/0006-shared-state-for-multiple-instances.md))
 - 배포: Docker 이미지 + Docker Desktop 내장 Kubernetes(Deployment·LoadBalancer Service·HPA), 부하는 k6
-- 공개 배포(6단계): OCI VM 한 대에 Docker Compose — Caddy(Let's Encrypt 자동 HTTPS) → 앱(`cluster` 프로필) + PostgreSQL + Redis (+ 선택 coturn) ([ADR-0007](docs/adr/0007-single-vm-compose-with-caddy.md))
+- 공개 배포(6단계): OCI VM 한 대에 Docker Compose — Caddy(Let's Encrypt 자동 HTTPS) → 앱 ([ADR-0007](docs/adr/0007-single-vm-compose-with-caddy.md))
+  - **실제 배포**: `VM.Standard.E2.1.Micro`(1GB) — 앱 기본 프로필(H2 파일 DB, 메모리 세션) + Caddy. A1 재고가 없어 선택 ([선택 기록](#1-oci-always-free-vm-만들기))
+  - A1(2 OCPU·12GB)을 쓸 수 있으면: 앱(`cluster` 프로필) + PostgreSQL + Redis (+ 선택 coturn) — 같은 `compose.yaml` 에서 `compose.micro.yaml` 만 빼면 됨
 - 데스크톱 앱(6단계): Electron 44 + electron-builder, Windows(x64·arm64)·macOS(arm64·x64), GitHub Actions 빌드 → GitHub Releases
 - 빌드: Gradle (Wrapper 포함, Gradle 설치 불필요)
 - 프론트엔드: 정적 HTML/CSS/JS (`src/main/resources/static`, 빌드 과정 없음)
@@ -185,14 +187,17 @@ kubectl -n chzzk get pods,svc,hpa
  인터넷 ── DNS: yewonjune.com A 레코드 → VM 공인 IP
    │ 80/443 (OCI 보안 목록 + VM iptables 허용)
    ▼
- OCI VM (Ubuntu, Docker Compose)  deploy/oci/compose.yaml
+ OCI VM  VM.Standard.E2.1.Micro (Ubuntu, Docker Compose, 스왑 2GB)
+         deploy/oci/compose.yaml + compose.micro.yaml
    caddy  :80 → https 이동, :443 TLS 종료 (Let's Encrypt 자동 발급·갱신)
-     └─▶ app:8080  Spring Boot (cluster 프로필, 프록시 헤더로 https 인식, 세션 쿠키 Secure)
-           ├─ postgres  기록 (볼륨 pgdata)
-           ├─ redis     로그인 세션·방송 방 상태
-           └─ uploads   업로드 영상 (볼륨)
+     └─▶ app:8080  Spring Boot (기본 프로필, 프록시 헤더로 https 인식, 세션 쿠키 Secure)
+           ├─ h2data   기록: H2 파일 DB (볼륨)
+           ├─ 메모리   로그인 세션·방송 방 상태 (앱 재시작 시 로그아웃)
+           └─ uploads  업로드 영상 (볼륨)
    (선택) coturn  3478 + 49160-49200/udp  WebRTC 중계
 ```
+
+A1 VM 을 쓸 수 있을 때는 `compose.micro.yaml` 없이 `compose.yaml` 만으로 띄우며, 이때 앱은 `cluster` 프로필로 기록은 **postgres**(볼륨 `pgdata`), 세션·방 상태는 **redis** 에 둡니다.
 
 ### 1) OCI Always Free VM 만들기
 
@@ -249,16 +254,21 @@ exit                        # docker 그룹 반영을 위해 다시 접속
 ssh ubuntu@<VM 공인 IP>
 cd ~/chzzk-clone
 nano deploy/oci/.env        # DOMAIN, ACME_EMAIL, DB_PASSWORD (+ 선택 TURN_*, TOSS_* 테스트 키)
-docker compose -f deploy/oci/compose.yaml --env-file deploy/oci/.env up -d --build
-docker compose -f deploy/oci/compose.yaml --env-file deploy/oci/.env ps        # app 이 healthy, caddy 가 running
-docker compose -f deploy/oci/compose.yaml --env-file deploy/oci/.env logs -f caddy   # "certificate obtained successfully"
+# 실제 배포(E2.1.Micro): 스왑을 먼저 만들고 compose.micro.yaml 을 덧씌웁니다
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+C="docker compose -f deploy/oci/compose.yaml -f deploy/oci/compose.micro.yaml --env-file deploy/oci/.env"
+$C up -d --build
+$C ps                       # app 이 healthy, caddy 가 running
+$C logs -f caddy            # "certificate obtained successfully"
 ```
 
-- 첫 빌드는 A1 에서 수 분 걸립니다(Gradle 의존성). 이후 코드 갱신: `git pull && docker compose ... up -d --build app`
+- A1 VM 이면 `C` 에서 `-f deploy/oci/compose.micro.yaml` 만 빼면 PostgreSQL·Redis 까지 함께 뜹니다.
+- 첫 빌드는 Gradle 의존성 때문에 수 분(Micro 는 더 오래) 걸립니다. 이후 코드 갱신: `git pull && $C up -d --build app`
+- 스왑을 재부팅 후에도 유지하려면 `echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab`
 - **비밀 값**: `deploy/oci/.env`(권한 600, git 제외)에만 둡니다. 저장소에는 [`deploy/oci/.env.example`](deploy/oci/.env.example)(예시 값)만 있습니다.
 - **TLS 구성**: Caddy 가 `DOMAIN` 으로 Let's Encrypt 인증서를 자동 발급(HTTP-01, 80번 포트)·갱신하고 볼륨 `caddy_data` 에 보관합니다. 앱은 내부 HTTP 로만 받고, `X-Forwarded-Proto` 로 HTTPS 를 인식합니다. 설정: [`deploy/oci/Caddyfile`](deploy/oci/Caddyfile)
 - **TURN(선택)**: 휴대폰(LTE)과 시청자가 다른 네트워크라 영상이 안 붙으면 `.env` 에 `TURN_URL=turn:yewonjune.com:3478`, `TURN_USERNAME`, `TURN_PASSWORD`, `TURN_EXTERNAL_IP=<공인IP>/<사설IP>` 를 넣고 `docker compose ... --profile turn up -d`
-- 데이터 백업: `docker compose ... exec postgres pg_dump -U chzzk chzzk > backup.sql`
+- 데이터 백업 (Micro, H2): `$C stop app && $C cp app:/app/data ./h2-backup && $C start app` — A1(PostgreSQL)이면 `$C exec postgres pg_dump -U chzzk chzzk > backup.sql`
 
 ## 데스크톱 클라이언트 (6단계)
 
@@ -326,13 +336,13 @@ npm run dist:mac            # macOS 에서 → desktop/dist/*.dmg, *.zip (macOS 
 **6단계에서 구현함 — 도메인·OCI 배포와 Windows/macOS 클라이언트**
 - **배포 설정** ([`deploy/oci/`](deploy/oci/)): VM 한 대에서 `docker compose up -d --build` 로 전체 실행
   - Caddy: 도메인으로 Let's Encrypt 인증서 **자동 발급·갱신**, HTTP→HTTPS 이동, HSTS, WebSocket·영상 Range 요청 전달, `/actuator/*` 중 health 외 차단
-  - 앱: 5단계 `cluster` 프로필(PostgreSQL 기록, Redis 세션·방 상태, 업로드 볼륨) 그대로 → 계정·방송·댓글·후원 기능 유지
+  - 앱: 같은 이미지·코드로 계정·방송·댓글·후원 기능 유지. 실제 배포(E2.1.Micro)는 `compose.micro.yaml` 로 기본 프로필(H2 파일 DB·메모리 세션, 볼륨 `h2data`·`uploads`), A1 이면 5단계 `cluster` 프로필(PostgreSQL 기록, Redis 세션·방 상태)
   - (선택) coturn TURN 서버: 휴대폰 LTE ↔ 다른 집 PC 처럼 직접 연결이 안 되는 시청을 중계
   - `setup-vm.sh`: Docker 설치, OCI Ubuntu 이미지의 iptables 에 80/443(+TURN) 허용, 저장소 받기
 - **서버 변경**
   - 프록시 뒤 HTTPS 인식: `server.forward-headers-strategy=native` (사설망·localhost 프록시의 `X-Forwarded-*` 만 신뢰), 세션 쿠키 `Secure` 를 `SESSION_COOKIE_SECURE` 로 따로 지정
   - 데스크톱 앱 출처(`app://chzzk`, `DESKTOP_ORIGINS`)에 한해 **조회(GET)만 CORS 허용**(쿠키 없음)·**시청 WebSocket 허용**. 다른 출처·상태 변경은 이전과 같이 막힘
-  - 상태 확인 경로: `/actuator/health`, `/actuator/health/liveness`, `/actuator/health/readiness`(DB·Redis 포함) — Compose healthcheck 가 readiness 로 판단하고, Caddy 는 앱이 healthy 가 된 뒤 시작
+  - 상태 확인 경로: `/actuator/health`, `/actuator/health/liveness`, `/actuator/health/readiness`(DB 포함, cluster 프로필이면 Redis 도) — Compose healthcheck 가 readiness 로 판단하고, Caddy 는 앱이 healthy 가 된 뒤 시작
   - 다운로드 목록 API `GET /api/downloads` + 다운로드 페이지 **`/download.html`** (OS별 파일 링크, 지원 아키텍처, 설치·실행 방법, 접속한 기기에 맞는 파일 추천). 메인 화면 오른쪽 위 **⬇ 앱**
   - 배포 주소·비밀 값은 모두 환경변수(`deploy/oci/.env`, git 제외)
 - **데스크톱 앱** ([`desktop/`](desktop/), Electron)
@@ -802,7 +812,7 @@ src/test/java/                  통합 테스트 (ApiClient: 사용자별 세션
 Dockerfile, .dockerignore       컨테이너 이미지
 k8s/                            Kubernetes 배포 (namespace · PostgreSQL · Redis · 업로드 PVC · 서버 · Service · HPA)
 load/autoscale.js               k6 부하 스크립트
-deploy/oci/                     6단계 OCI VM 배포: compose.yaml(Caddy·앱·PostgreSQL·Redis·coturn) · Caddyfile · .env.example · setup-vm.sh · compose.micro.yaml
+deploy/oci/                     6단계 OCI VM 배포: compose.yaml(Caddy·앱·PostgreSQL·Redis·coturn) · compose.micro.yaml(실제 배포: E2.1.Micro, H2, PostgreSQL·Redis 끔) · Caddyfile · .env.example · setup-vm.sh
 desktop/                        6단계 데스크톱 앱 (Electron): main.js · preload.js · renderer/(목록·재생 화면) · build/adhoc-sign.cjs
 .github/workflows/desktop.yml   Windows·macOS 패키지 빌드 → GitHub Releases
 samples/                        확인용 샘플 영상
