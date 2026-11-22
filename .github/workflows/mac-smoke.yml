@@ -1,0 +1,76 @@
+# macOS 실행 확인: 공개 다운로드 링크에서 dmg 를 받아 설치하고, 앱의 자동 점검 모드(CHZZK_SMOKE)로
+# 배포 서버(https://yewonjune.com)의 방송 목록 조회와 다시보기 재생을 확인합니다.
+# Actions 탭 → "macOS smoke test" → Run workflow 로 실행 (replay 번호는 서버에 있는 다시보기 번호)
+name: macOS smoke test
+
+on:
+  workflow_dispatch:
+    inputs:
+      replay:
+        description: "재생해 볼 다시보기 번호"
+        default: "1"
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest       # Apple Silicon
+            arch: arm64
+          - runner: macos-15-intel     # Intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - name: 환경
+        run: sw_vers; uname -m
+
+      - name: 공개 링크로 내려받기
+        run: |
+          URL="https://github.com/yewonjune/chzzk-clone/releases/latest/download/Chzzk-mac-${{ matrix.arch }}.dmg"
+          curl -fL --retry 3 -o Chzzk.dmg "$URL"
+          ls -l Chzzk.dmg
+
+      - name: 설치 (dmg → /Applications, Gatekeeper 격리 표시 제거)
+        run: |
+          hdiutil attach Chzzk.dmg -nobrowse -mountpoint /Volumes/Chzzk
+          cp -R /Volumes/Chzzk/*.app /Applications/
+          hdiutil detach /Volumes/Chzzk
+          xattr -dr com.apple.quarantine /Applications/Chzzk.app || true
+          codesign -dv /Applications/Chzzk.app 2>&1 | head -5
+          file /Applications/Chzzk.app/Contents/MacOS/*
+
+      - name: 실행 · 목록 조회 · 다시보기 재생
+        env:
+          CHZZK_SMOKE: "1"
+          CHZZK_SMOKE_OPEN: replay/${{ github.event.inputs.replay }}
+          CHZZK_SMOKE_WAIT: "8000"
+          CHZZK_SMOKE_SHOT: ${{ github.workspace }}/screenshot-${{ matrix.arch }}.png
+        run: |
+          BIN=$(ls /Applications/Chzzk.app/Contents/MacOS/* | head -1)
+          ( "$BIN" 2>&1 & PID=$!; sleep 60; kill $PID 2>/dev/null ) | tee run.log
+          LINE=$(grep '^CHZZK_SMOKE ' run.log | tail -1 | sed 's/^CHZZK_SMOKE //')
+          echo "$LINE"
+          test -n "$LINE" || { echo "점검 결과가 출력되지 않음"; exit 1; }
+          echo "$LINE" | python3 -c '
+          import json, sys
+          r = json.load(sys.stdin)
+          l, w = r.get("list", {}), r.get("watch", {})
+          print("서버:", l.get("server"), "| 라이브", l.get("live"), "다시보기", l.get("replays"), "지난 방송", l.get("ended"))
+          print("재생:", w)
+          assert not r.get("failure"), r.get("failure")
+          assert not l.get("error"), l.get("error")
+          assert l.get("replays", 0) > 0, "다시보기 목록이 비어 있음"
+          assert w.get("readyState", 0) >= 2 and w.get("currentTime", 0) > 0, "재생되지 않음"
+          print("OK")'
+
+      - name: 스크린샷 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-${{ matrix.arch }}
+          path: |
+            screenshot-${{ matrix.arch }}.png
+            run.log
+          if-no-files-found: ignore
