@@ -270,3 +270,22 @@ input[type=number] {
 .dl-steps ol, .dl-steps ul { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
 .dl-box code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
 @media (max-width: 600px) { .dl-table { font-size: 13px; } .dl-table th:nth-child(4), .dl-table td:nth-child(4) { display: none; } }
+
+/* ---- 상단바: 좁은 화면(휴대폰)에서도 한 줄 유지 ---- */
+.logo, .btn, #auth-slot .me { white-space: nowrap; }
+.logo { flex-shrink: 0; }
+.nav { min-width: 0; }
+@media (max-width: 600px) {
+  .topbar { gap: 8px; padding: 8px 12px; }
+  .logo { font-size: 18px; }
+  .nav { gap: 6px; overflow-x: auto; scrollbar-width: none; }
+  .nav::-webkit-scrollbar { display: none; }
+  .nav .btn { padding: 7px 10px; font-size: 13px; flex-shrink: 0; }
+  .hide-sm { display: none; }
+  #auth-slot { gap: 6px; flex-shrink: 0; }
+  #auth-slot .me { max-width: 5em; font-size: 13px; }
+}
+@media (max-width: 420px) {
+  .logo-text { display: none; }
+  #auth-slot .me { display: none; }
+}
