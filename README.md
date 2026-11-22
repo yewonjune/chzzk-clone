@@ -169,20 +169,20 @@ kubectl -n chzzk get pods,svc,hpa
 
 | 항목 | 내용 |
 | --- | --- |
-| 서비스 주소 | `https://<도메인>` — **도메인 구매·배포 후 기입** |
-| 다운로드 페이지 | `https://<도메인>/download.html` |
-| 상태 확인 | `https://<도메인>/actuator/health` (`{"status":"UP"}`), `/actuator/health/readiness`, `/actuator/health/liveness` |
+| 서비스 주소 | `https://yewonjune.com` |
+| 다운로드 페이지 | `https://yewonjune.com/download.html` |
+| 상태 확인 | `https://yewonjune.com/actuator/health` (`{"status":"UP"}`), `/actuator/health/readiness`, `/actuator/health/liveness` |
 | 데스크톱 앱 파일 | https://github.com/yewonjune/chzzk-clone/releases/latest |
-| 도메인 등록 여부 | **미등록 (구매 후 기입)** — 등록처: ___ , 등록일: ___ |
+| 도메인 등록 여부 | **등록함** (`yewonjune.com`) — 등록처: ___ , 등록일: ___ , 네임서버: `ns1~ns4.hosting.co.kr` |
 | 최초 등록 비용 | ___ 원 (구매 영수증 기준으로 기입. 결제 정보는 적지 않음) |
 | 갱신 비용 | ___ 원/년 (등록처의 갱신 가격 표 기준으로 기입) |
 
-> 아직 도메인을 사지 않았고 VM 도 만들지 않았으므로 위 값은 비어 있습니다. 아래 절차대로 진행한 뒤 실제 값으로 바꿉니다. 가격은 등록처·TLD·환율·프로모션에 따라 달라서 예상값을 적지 않았습니다(처음 1년 할인 뒤 갱신가가 오르는 경우가 많으니 **갱신 가격을 꼭 같이 확인**).
+> 도메인은 등록했고, VM 생성·배포는 아직 진행 전입니다. 비어 있는 값은 아래 절차대로 진행한 뒤 실제 값으로 바꿉니다. 가격은 등록처·TLD·환율·프로모션에 따라 달라서 예상값을 적지 않았습니다(처음 1년 할인 뒤 갱신가가 오르는 경우가 많으니 **갱신 가격을 꼭 같이 확인**).
 
 ### 구성
 
 ```
- 인터넷 ── DNS: <도메인> A 레코드 → VM 공인 IP
+ 인터넷 ── DNS: yewonjune.com A 레코드 → VM 공인 IP
    │ 80/443 (OCI 보안 목록 + VM iptables 허용)
    ▼
  OCI VM (Ubuntu, Docker Compose)  deploy/oci/compose.yaml
@@ -225,10 +225,10 @@ A1 을 우선하는 이유: 서버(JVM)·PostgreSQL·Redis·Caddy·이미지 빌
 | 유형 | 이름 | 값 | TTL |
 | --- | --- | --- | --- |
 | A | `@` | VM 공인 IP | 300 |
-| CNAME | `www` | `<도메인>` | 300 |
+| CNAME | `www` | `yewonjune.com` | 300 |
 
    Cloudflare DNS 를 쓰면 처음에는 **프록시 끔(회색 구름, DNS only)** 으로 두세요. Caddy 가 80번 포트로 직접 인증서를 받아야 하고, WebSocket·업로드 크기 제한도 피할 수 있습니다.
-3. 반영 확인: `nslookup <도메인>` 결과가 VM 공인 IP 인지 확인합니다(보통 수 분, 길면 수 시간).
+3. 반영 확인: `nslookup yewonjune.com` 결과가 VM 공인 IP 인지 확인합니다(보통 수 분, 길면 수 시간).
 
 ### 3) VM 에 배포
 
@@ -248,14 +248,14 @@ docker compose -f deploy/oci/compose.yaml --env-file deploy/oci/.env logs -f cad
 - 첫 빌드는 A1 에서 수 분 걸립니다(Gradle 의존성). 이후 코드 갱신: `git pull && docker compose ... up -d --build app`
 - **비밀 값**: `deploy/oci/.env`(권한 600, git 제외)에만 둡니다. 저장소에는 [`deploy/oci/.env.example`](deploy/oci/.env.example)(예시 값)만 있습니다.
 - **TLS 구성**: Caddy 가 `DOMAIN` 으로 Let's Encrypt 인증서를 자동 발급(HTTP-01, 80번 포트)·갱신하고 볼륨 `caddy_data` 에 보관합니다. 앱은 내부 HTTP 로만 받고, `X-Forwarded-Proto` 로 HTTPS 를 인식합니다. 설정: [`deploy/oci/Caddyfile`](deploy/oci/Caddyfile)
-- **TURN(선택)**: 휴대폰(LTE)과 시청자가 다른 네트워크라 영상이 안 붙으면 `.env` 에 `TURN_URL=turn:<도메인>:3478`, `TURN_USERNAME`, `TURN_PASSWORD`, `TURN_EXTERNAL_IP=<공인IP>/<사설IP>` 를 넣고 `docker compose ... --profile turn up -d`
+- **TURN(선택)**: 휴대폰(LTE)과 시청자가 다른 네트워크라 영상이 안 붙으면 `.env` 에 `TURN_URL=turn:yewonjune.com:3478`, `TURN_USERNAME`, `TURN_PASSWORD`, `TURN_EXTERNAL_IP=<공인IP>/<사설IP>` 를 넣고 `docker compose ... --profile turn up -d`
 - 데이터 백업: `docker compose ... exec postgres pg_dump -U chzzk chzzk > backup.sql`
 
 ## 데스크톱 클라이언트 (6단계)
 
 ### 내려받기·설치
 
-공개 다운로드 페이지 **`https://<도메인>/download.html`** 에서 OS 에 맞는 파일을 받습니다(파일은 GitHub Releases 에 있음).
+공개 다운로드 페이지 **`https://yewonjune.com/download.html`** 에서 OS 에 맞는 파일을 받습니다(파일은 GitHub Releases 에 있음).
 
 | OS | 아키텍처 | 파일 | 설치·실행 |
 | --- | --- | --- | --- |
@@ -270,7 +270,7 @@ docker compose -f deploy/oci/compose.yaml --env-file deploy/oci/.env logs -f cad
 ### 빌드·릴리스
 
 ```bash
-# 저장소 Settings → Secrets and variables → Actions → Variables 에 CHZZK_SERVER_URL=https://<도메인> 추가 (비밀 아님)
+# 저장소 Settings → Secrets and variables → Actions → Variables 에 CHZZK_SERVER_URL=https://yewonjune.com 추가 (비밀 아님)
 git tag desktop-v1.0.0
 git push origin desktop-v1.0.0
 # → Actions "Desktop app" 이 windows-latest·macos-latest 에서 빌드 → Releases 에 7개 파일 첨부
@@ -456,16 +456,16 @@ cloudflared tunnel --url http://localhost:8080
 ### F. 공개 배포·데스크톱 앱 (6단계) — 외부 네트워크에서 도메인·HTTPS·다운로드·재생
 
 **서버 (휴대폰 LTE 처럼 VM 과 다른 네트워크에서)**
-1. `nslookup <도메인>` → VM 공인 IP.
-2. 브라우저로 `http://<도메인>` → 자동으로 `https://<도메인>` 으로 이동, 주소창 자물쇠 → 인증서 발급자 **Let's Encrypt**, 만료일 확인.
-3. `https://<도메인>/actuator/health` → `{"status":"UP"}`.
+1. `nslookup yewonjune.com` → VM 공인 IP.
+2. 브라우저로 `http://yewonjune.com` → 자동으로 `https://yewonjune.com` 으로 이동, 주소창 자물쇠 → 인증서 발급자 **Let's Encrypt**, 만료일 확인.
+3. `https://yewonjune.com/actuator/health` → `{"status":"UP"}`.
 4. 웹에서 회원가입 → 다시보기 등록 → 재생, 댓글, 후원(테스트 결제) → 1~5단계 기능이 도메인에서 동작하는지 확인.
-5. 휴대폰에서 `https://<도메인>/go-live.html` → 로그인 → 방송 시작 (정식 인증서라 경고 없이 카메라 허용 창이 뜸).
+5. 휴대폰에서 `https://yewonjune.com/go-live.html` → 로그인 → 방송 시작 (정식 인증서라 경고 없이 카메라 허용 창이 뜸).
 
 **데스크톱 앱 (Windows PC 와 Mac 각각)**
-1. `https://<도메인>/download.html` → 내 기기에 맞는 추천 버튼, 표에 OS별 파일·아키텍처, 설치 방법이 보이는지 확인.
+1. `https://yewonjune.com/download.html` → 내 기기에 맞는 추천 버튼, 표에 OS별 파일·아키텍처, 설치 방법이 보이는지 확인.
 2. 파일 링크로 내려받기 → 위 [데스크톱 클라이언트](#데스크톱-클라이언트-6단계) 표대로 설치·실행.
-3. 앱 오른쪽 위에 `<도메인>` 이 보이고 **라이브·다시보기·지난 방송** 목록이 웹과 같은지 확인.
+3. 앱 오른쪽 위에 `yewonjune.com` 이 보이고 **라이브·다시보기·지난 방송** 목록이 웹과 같은지 확인.
 4. 다시보기 카드 → 영상 재생, 진행 막대로 구간 이동.
 5. 휴대폰으로 방송을 켠 상태에서 앱의 라이브 카드 → 영상·소리 재생, 시청자 수 증가, 휴대폰에서 종료하면 앱에 "방송이 종료되었습니다".
 
