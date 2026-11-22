@@ -266,7 +266,7 @@ $C logs -f caddy            # "certificate obtained successfully"
 - 첫 빌드는 Gradle 의존성 때문에 수 분(Micro 는 더 오래) 걸립니다. 이후 코드 갱신: `git pull && $C up -d --build app`
 - 스왑을 재부팅 후에도 유지하려면 `echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab`
 - **비밀 값**: `deploy/oci/.env`(권한 600, git 제외)에만 둡니다. 저장소에는 [`deploy/oci/.env.example`](deploy/oci/.env.example)(예시 값)만 있습니다.
-- **TLS 구성**: Caddy 가 `DOMAIN` 으로 Let's Encrypt 인증서를 자동 발급(HTTP-01, 80번 포트)·갱신하고 볼륨 `caddy_data` 에 보관합니다. 앱은 내부 HTTP 로만 받고, `X-Forwarded-Proto` 로 HTTPS 를 인식합니다. 설정: [`deploy/oci/Caddyfile`](deploy/oci/Caddyfile)
+- **TLS 구성**: Caddy 가 `DOMAIN` 으로 무료 ACME 인증서를 자동 발급(HTTP-01, 80번 포트)·갱신하고(발급처는 Let's Encrypt 와 ZeroSSL 중 Caddy 가 고름 — 현재 배포는 ZeroSSL) 볼륨 `caddy_data` 에 보관합니다. 앱은 내부 HTTP 로만 받고, `X-Forwarded-Proto` 로 HTTPS 를 인식합니다. 설정: [`deploy/oci/Caddyfile`](deploy/oci/Caddyfile)
 - **TURN(선택)**: 휴대폰(LTE)과 시청자가 다른 네트워크라 영상이 안 붙으면 `.env` 에 `TURN_URL=turn:yewonjune.com:3478`, `TURN_USERNAME`, `TURN_PASSWORD`, `TURN_EXTERNAL_IP=<공인IP>/<사설IP>` 를 넣고 `docker compose ... --profile turn up -d`
 - 데이터 백업 (Micro, H2): `$C stop app && $C cp app:/app/data ./h2-backup && $C start app` — A1(PostgreSQL)이면 `$C exec postgres pg_dump -U chzzk chzzk > backup.sql`
 
@@ -476,7 +476,7 @@ cloudflared tunnel --url http://localhost:8080
 
 **서버 (휴대폰 LTE 처럼 VM 과 다른 네트워크에서)**
 1. `nslookup yewonjune.com` → VM 공인 IP.
-2. 브라우저로 `http://yewonjune.com` → 자동으로 `https://yewonjune.com` 으로 이동, 주소창 자물쇠 → 인증서 발급자 **Let's Encrypt**, 만료일 확인.
+2. 브라우저로 `http://yewonjune.com` → 자동으로 `https://yewonjune.com` 으로 이동, 주소창 자물쇠 → 인증서 발급자 **ZeroSSL 또는 Let's Encrypt**(Caddy 가 자동으로 고름), 만료일 확인.
 3. `https://yewonjune.com/actuator/health` → `{"status":"UP"}`.
 4. 웹에서 회원가입 → 다시보기 등록 → 재생, 댓글, 후원(테스트 결제) → 1~5단계 기능이 도메인에서 동작하는지 확인.
 5. 휴대폰에서 `https://yewonjune.com/go-live.html` → 로그인 → 방송 시작 (정식 인증서라 경고 없이 카메라 허용 창이 뜸).
@@ -495,12 +495,14 @@ cloudflared tunnel --url http://localhost:8080
 | 자동 테스트 `./gradlew test` (23개, 데스크톱 출처 CORS·WebSocket·프록시 HTTPS 인식 포함) | Windows 11 / x64 (JDK 25) | 로컬 | ✅ 통과 | 2026-11-21 |
 | Windows 패키지 빌드 (`npm run dist:win`): `Chzzk-Setup-win-x64.exe`·`Chzzk-Setup-win-arm64.exe`·`Chzzk-win-x64.zip` | Windows 11 / x64 | 로컬 | ✅ 생성됨 | 2026-11-21 |
 | 빌드된 Windows 앱(`win-unpacked/Chzzk.exe`) → 로컬 서버: 목록 조회, 다시보기 재생(5초 영상 끝까지), 라이브 WebRTC 시청(시청자 1명) | Windows 11 / x64 | 로컬 (`http://localhost:8080`) | ✅ 동작 | 2026-11-21 |
-| 도메인 HTTP→HTTPS, 인증서, `/actuator/health` | ___ | 외부 (___) | ⬜ 배포 후 기입 | |
-| 다운로드 페이지 → Windows 설치 파일 받기·설치·실행, 목록·다시보기·라이브 | Windows ___ / ___ | 외부 | ⬜ 배포 후 기입 | |
-| 다운로드 페이지 → macOS dmg 받기·실행(Gatekeeper 허용), 목록·다시보기·라이브 | macOS ___ / ___ | 외부 | ⬜ 배포 후 기입 | |
-| GitHub Actions 빌드 → Releases 7개 파일 | windows-latest, macos-latest | — | ⬜ 태그 push 후 기입 | |
+| 도메인: `www`·`http://` → `https://yewonjune.com` 이동(301/308), 인증서 ZeroSSL ECC DV (2026-11-22 ~ 2027-02-20), `/actuator/health` → `UP`, `/download.html` 200, `/api/downloads` 7개 링크, 데스크톱 출처 CORS 허용 | Windows 10 Home 22H2 (19045) / x64 | 외부 (가정 인터넷 → OCI 오사카) | ✅ 동작 | 2026-11-22 |
+| 웹 브라우저로 `https://yewonjune.com` 접속·이용 | Windows 10 Home 22H2 / x64 | 외부 (가정 인터넷) | ✅ 동작 | 2026-11-22 |
+| 휴대폰 브라우저로 `https://yewonjune.com` 접속·이용 | 휴대폰 | 외부 | ✅ 동작 | 2026-11-22 |
+| 다운로드 페이지 → `Chzzk-Setup-win-x64.exe` 받기·설치·실행, 목록 조회·재생 | Windows 10 Home 22H2 (19045) / x64 | 외부 (공개 링크) | ✅ 동작 | 2026-11-22 |
+| 다운로드 페이지 → macOS dmg 받기·실행(Gatekeeper 허용), 목록·다시보기·라이브 | macOS ___ / ___ | 외부 | ⬜ Mac 확인 후 기입 | |
+| GitHub Actions 빌드(`desktop-v1.0.0` 태그) → Releases 7개 파일 (win x64·arm64 exe, win x64 zip, mac arm64·x64 dmg·zip) | windows-latest, macos-latest | — | ✅ 성공 (3분 46초) | 2026-11-22 |
 
-> 위 ✅ 세 줄은 실제로 실행한 결과입니다. 도메인·VM·macOS 는 아직 준비되지 않아 ⬜ 로 남겨 두었고, 진행한 뒤 OS 버전·아키텍처·결과를 채웁니다. 앱이 서버와 실제로 통신하는지는 사람 없이도 확인할 수 있습니다: `CHZZK_SMOKE=1 CHZZK_SMOKE_OPEN=replay/1 Chzzk.exe` → 표준 출력에 목록 개수와 재생 상태(`readyState`, `currentTime`)가 찍히고 종료됩니다.
+> ✅ 줄은 실제로 실행한 결과입니다. macOS 는 아직 확인하지 않아 ⬜ 로 남겨 두었고, 확인한 뒤 OS 버전·아키텍처·결과를 채웁니다. 앱이 서버와 실제로 통신하는지는 사람 없이도 확인할 수 있습니다: `CHZZK_SMOKE=1 CHZZK_SMOKE_OPEN=replay/1 Chzzk.exe` → 표준 출력에 목록 개수와 재생 상태(`readyState`, `currentTime`)가 찍히고 종료됩니다.
 
 ### E. 로컬 오토스케일 (5단계) — 부하에 따라 늘고 줄기, 그동안 상태 유지
 
